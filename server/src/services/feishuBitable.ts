@@ -1,0 +1,136 @@
+import { env } from '../config/env.js';
+import { getFeishuToken } from './feishuToken.js';
+
+const BITABLE_API = 'https://open.feishu.cn/open-apis/bitable/v1/apps';
+
+interface BitableRecord {
+  fields: Record<string, unknown>;
+}
+
+interface ArticleRecord {
+  title: string;
+  refDate: string;
+  msgid: string;
+  intPageReadUser: number;
+  intPageReadCount: number;
+  oriPageReadUser: number;
+  oriPageReadCount: number;
+  shareUser: number;
+  shareCount: number;
+  addToFavUser: number;
+  addToFavCount: number;
+}
+
+function toBitableFields(article: ArticleRecord): Record<string, unknown> {
+  // Feishu date field expects Unix timestamp in milliseconds
+  const dateMs = new Date(article.refDate).getTime();
+
+  return {
+    '文章标题': article.title,
+    '日期': dateMs,
+    '消息ID': article.msgid,
+    '图文页阅读人数': article.intPageReadUser,
+    '图文页阅读次数': article.intPageReadCount,
+    '原文页阅读人数': article.oriPageReadUser,
+    '原文页阅读次数': article.oriPageReadCount,
+    '分享人数': article.shareUser,
+    '分享次数': article.shareCount,
+    '收藏人数': article.addToFavUser,
+    '收藏次数': article.addToFavCount,
+  };
+}
+
+async function feishuRequest(method: string, path: string, body?: unknown): Promise<unknown> {
+  const token = await getFeishuToken();
+  const url = `${BITABLE_API}/${env.FEISHU_BITABLE_APP_TOKEN}/tables/${env.FEISHU_BITABLE_TABLE_ID}${path}`;
+
+  const res = await fetch(url, {
+    method,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const data = (await res.json()) as { code: number; msg: string; data?: unknown };
+
+  if (data.code !== 0) {
+    throw new Error(`Feishu Bitable API error ${data.code}: ${data.msg}`);
+  }
+
+  return data.data;
+}
+
+// Fetch existing records to deduplicate by title + date + msgid
+async function getExistingKeys(): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let pageToken: string | undefined;
+  let hasMore = true;
+
+  while (hasMore) {
+    const params = new URLSearchParams({ page_size: '500' });
+    if (pageToken) params.set('page_token', pageToken);
+
+    const result = (await feishuRequest('GET', `/records?${params}`)) as {
+      items?: { fields: Record<string, unknown> }[];
+      has_more: boolean;
+      page_token?: string;
+    };
+
+    if (result.items) {
+      for (const item of result.items) {
+        const title = String(item.fields['文章标题'] || '');
+        const date = Number(item.fields['日期'] || 0);
+        const msgid = String(item.fields['消息ID'] || '');
+        keys.add(`${title}|${date}|${msgid}`);
+      }
+    }
+
+    hasMore = result.has_more;
+    pageToken = result.page_token;
+  }
+
+  return keys;
+}
+
+export async function syncArticlesToBitable(articles: ArticleRecord[]): Promise<{ created: number; skipped: number }> {
+  if (articles.length === 0) {
+    return { created: 0, skipped: 0 };
+  }
+
+  // Get existing records to avoid duplicates
+  const existingKeys = await getExistingKeys();
+
+  const newRecords: BitableRecord[] = [];
+  let skipped = 0;
+
+  for (const article of articles) {
+    const dateMs = new Date(article.refDate).getTime();
+    const key = `${article.title}|${dateMs}|${article.msgid}`;
+
+    if (existingKeys.has(key)) {
+      skipped++;
+      continue;
+    }
+
+    newRecords.push({ fields: toBitableFields(article) });
+  }
+
+  if (newRecords.length === 0) {
+    return { created: 0, skipped };
+  }
+
+  // Feishu batch create supports max 500 records per request
+  let created = 0;
+  for (let i = 0; i < newRecords.length; i += 500) {
+    const batch = newRecords.slice(i, i + 500);
+    await feishuRequest('POST', '/records/batch_create', { records: batch });
+    created += batch.length;
+    console.log(`[Feishu] Batch created ${batch.length} records (${created}/${newRecords.length})`);
+  }
+
+  return { created, skipped };
+}
+
+export type { ArticleRecord };

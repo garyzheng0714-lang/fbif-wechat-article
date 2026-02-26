@@ -1,5 +1,14 @@
 import type { DashboardData, ArticleTotalItem } from '../types/wechat';
 
+async function extractErrorMessage(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    return body.error || body.message || `API error: ${res.status} ${res.statusText}`;
+  } catch {
+    return `API error: ${res.status} ${res.statusText}`;
+  }
+}
+
 async function post<T>(path: string, body: object): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
@@ -7,7 +16,7 @@ async function post<T>(path: string, body: object): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    throw new Error(await extractErrorMessage(res));
   }
   return res.json();
 }
@@ -15,7 +24,7 @@ async function post<T>(path: string, body: object): Promise<T> {
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(path);
   if (!res.ok) {
-    throw new Error(`API error: ${res.status} ${res.statusText}`);
+    throw new Error(await extractErrorMessage(res));
   }
   return res.json();
 }
@@ -44,5 +53,14 @@ export const api = {
       appid,
       secret,
     });
+  },
+
+  async saveCredentialsRaw(appid: string, secret: string): Promise<{ success: boolean; appid: string; error?: string; errCode?: number; hint?: string }> {
+    const res = await fetch('/api/config/credentials', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appid, secret }),
+    });
+    return res.json();
   },
 };

@@ -27,14 +27,24 @@ export default function Settings() {
     setSaving(true);
     setResult(null);
     try {
-      const res = await api.saveCredentials(values.appid, values.secret);
-      setStatus({ configured: true, appid: res.appid });
-      setResult({ type: 'success', message: '凭据保存成功，已通过验证并开始拉取数据' });
-      form.resetFields(['secret']);
+      const res = await api.saveCredentialsRaw(values.appid, values.secret);
+      if (res.success) {
+        setStatus({ configured: true, appid: res.appid! });
+        setResult({ type: 'success', message: '凭据保存成功，已通过验证并开始拉取数据' });
+        form.resetFields(['secret']);
+      } else {
+        const parts: string[] = [];
+        if (res.error) parts.push(res.error);
+        if (res.hint) parts.push(res.hint);
+        setResult({
+          type: 'error',
+          message: parts.length > 0 ? parts.join('\n') : '保存失败，请检查 AppID 和 AppSecret 是否正确',
+        });
+      }
     } catch (err) {
       setResult({
         type: 'error',
-        message: err instanceof Error ? err.message : '保存失败，请检查 AppID 和 AppSecret 是否正确',
+        message: err instanceof Error ? err.message : '网络错误，请检查服务器是否正常运行',
       });
     } finally {
       setSaving(false);
@@ -86,7 +96,9 @@ export default function Settings() {
         {result && (
           <Alert
             message={result.type === 'success' ? '配置成功' : '配置失败'}
-            description={result.message}
+            description={
+              <div style={{ whiteSpace: 'pre-line' }}>{result.message}</div>
+            }
             type={result.type}
             showIcon
             closable

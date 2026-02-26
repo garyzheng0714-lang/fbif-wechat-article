@@ -35,7 +35,7 @@ feishuRouter.post('/sync', async (req, res, next) => {
     const items = (summaryData.list || []) as ArticleSummaryItem[];
 
     if (items.length === 0) {
-      res.json({ success: true, message: 'No articles found in date range', created: 0, skipped: 0 });
+      res.json({ success: true, message: 'No articles found in date range', total: 0, created: 0, updated: 0 });
       return;
     }
 
@@ -58,14 +58,14 @@ feishuRouter.post('/sync', async (req, res, next) => {
 
     const result = await syncArticlesToBitable(articles);
 
-    console.log(`[Feishu Sync] Done. Created: ${result.created}, Skipped: ${result.skipped}`);
+    console.log(`[Feishu Sync] Done. Created: ${result.created}, Updated: ${result.updated}`);
 
     res.json({
       success: true,
-      message: `Synced ${result.created} new articles to Feishu Bitable`,
+      message: `Synced ${result.created} new, updated ${result.updated} existing articles`,
       total: articles.length,
       created: result.created,
-      skipped: result.skipped,
+      updated: result.updated,
     });
   } catch (err) {
     next(err);

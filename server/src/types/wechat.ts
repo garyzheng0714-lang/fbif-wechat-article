@@ -96,6 +96,24 @@ export interface UserCumulateItem {
   cumulate_user: number;
 }
 
+// --- freepublish/batchget response ---
+export interface FreepublishNewsItem {
+  title: string;
+  url: string;
+  author: string;
+  digest: string;
+  thumb_url: string;
+  content_source_url: string;
+}
+
+export interface FreepublishItem {
+  article_id: string;
+  content: {
+    news_item: FreepublishNewsItem[];
+  };
+  update_time: number;
+}
+
 // --- Batch dashboard response ---
 export interface DashboardData {
   articleSummary: { list: ArticleSummaryItem[] } | null;

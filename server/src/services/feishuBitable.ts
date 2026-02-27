@@ -139,6 +139,98 @@ async function feishuRequest(method: string, path: string, body?: unknown, table
   return data.data;
 }
 
+// Feishu Bitable field types
+const FIELD_TYPE_TEXT = 1;
+const FIELD_TYPE_NUMBER = 2;
+const FIELD_TYPE_DATETIME = 5;
+
+interface FieldSpec {
+  name: string;
+  type: number;
+}
+
+// Fetch existing fields for a table
+async function getExistingFields(tableId?: string): Promise<Set<string>> {
+  const fieldNames = new Set<string>();
+  let pageToken: string | undefined;
+  let hasMore = true;
+
+  while (hasMore) {
+    const params = new URLSearchParams({ page_size: '100' });
+    if (pageToken) params.set('page_token', pageToken);
+
+    const result = (await feishuRequest('GET', `/fields?${params}`, undefined, tableId)) as {
+      items?: { field_name: string }[];
+      has_more: boolean;
+      page_token?: string;
+    };
+
+    if (result.items) {
+      for (const item of result.items) {
+        fieldNames.add(item.field_name);
+      }
+    }
+
+    hasMore = result.has_more;
+    pageToken = result.page_token;
+  }
+
+  return fieldNames;
+}
+
+// Ensure all required fields exist in the table, create missing ones
+async function ensureFieldsExist(requiredFields: FieldSpec[], tableId?: string): Promise<void> {
+  const existingFields = await getExistingFields(tableId);
+
+  for (const field of requiredFields) {
+    if (!existingFields.has(field.name)) {
+      console.log(`[Feishu] Creating missing field: ${field.name} (type: ${field.type})`);
+      await feishuRequest('POST', '/fields', { field_name: field.name, type: field.type }, tableId);
+    }
+  }
+}
+
+// Article table required fields (including new getarticletotal fields)
+const ARTICLE_FIELDS: FieldSpec[] = [
+  { name: '文章标题', type: FIELD_TYPE_TEXT },
+  { name: '发布日期', type: FIELD_TYPE_DATETIME },
+  { name: '消息ID', type: FIELD_TYPE_TEXT },
+  { name: '图文页阅读人数', type: FIELD_TYPE_NUMBER },
+  { name: '图文页阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '原文页阅读人数', type: FIELD_TYPE_NUMBER },
+  { name: '原文页阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '分享人数', type: FIELD_TYPE_NUMBER },
+  { name: '分享次数', type: FIELD_TYPE_NUMBER },
+  { name: '收藏人数', type: FIELD_TYPE_NUMBER },
+  { name: '收藏次数', type: FIELD_TYPE_NUMBER },
+  { name: '更新时间', type: FIELD_TYPE_DATETIME },
+  { name: '送达人数', type: FIELD_TYPE_NUMBER },
+  { name: '会话阅读人数', type: FIELD_TYPE_NUMBER },
+  { name: '会话阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '历史消息阅读人数', type: FIELD_TYPE_NUMBER },
+  { name: '历史消息阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '朋友圈阅读人数', type: FIELD_TYPE_NUMBER },
+  { name: '朋友圈阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '好友转发阅读人数', type: FIELD_TYPE_NUMBER },
+  { name: '好友转发阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '其他来源阅读人数', type: FIELD_TYPE_NUMBER },
+  { name: '其他来源阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '文章位置', type: FIELD_TYPE_NUMBER },
+];
+
+// User growth table required fields
+const USER_GROWTH_FIELDS: FieldSpec[] = [
+  { name: '日期', type: FIELD_TYPE_DATETIME },
+  { name: '用户渠道', type: FIELD_TYPE_TEXT },
+  { name: '渠道编号', type: FIELD_TYPE_NUMBER },
+  { name: '新关注人数', type: FIELD_TYPE_NUMBER },
+  { name: '取消关注人数', type: FIELD_TYPE_NUMBER },
+  { name: '净增人数', type: FIELD_TYPE_NUMBER },
+  { name: '累计关注人数', type: FIELD_TYPE_NUMBER },
+  { name: '唯一键', type: FIELD_TYPE_TEXT },
+  { name: '更新时间', type: FIELD_TYPE_DATETIME },
+];
+
 // Fetch existing records and return a map of uniqueKey → record_id
 async function getExistingRecords(keyField: string, tableId?: string): Promise<Map<string, string>> {
   const recordMap = new Map<string, string>();
@@ -218,6 +310,9 @@ async function syncRecordsToBitable(
 }
 
 export async function syncArticlesToBitable(articles: ArticleRecord[]): Promise<{ created: number; updated: number }> {
+  // Ensure all required fields exist in the article table
+  await ensureFieldsExist(ARTICLE_FIELDS, env.FEISHU_BITABLE_TABLE_ID);
+
   const records = articles.map((article) => ({
     uniqueKey: article.msgid,
     fields: toBitableFields(article),
@@ -231,6 +326,9 @@ export async function syncUserGrowthToBitable(userRecords: UserGrowthRecord[]): 
   if (!tableId) {
     throw new Error('FEISHU_BITABLE_TABLE_ID_USERS not configured');
   }
+
+  // Ensure all required fields exist in the user growth table
+  await ensureFieldsExist(USER_GROWTH_FIELDS, tableId);
 
   // Unique key: "日期_渠道编号"
   const records = userRecords.map((record) => {

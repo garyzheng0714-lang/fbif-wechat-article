@@ -82,6 +82,20 @@ export interface UserShareHourItem extends UserShareItem {
   ref_hour: number;
 }
 
+// --- getusersummary response ---
+export interface UserSummaryItem {
+  ref_date: string;
+  user_source: number;
+  new_user: number;
+  cancel_user: number;
+}
+
+// --- getusercumulate response ---
+export interface UserCumulateItem {
+  ref_date: string;
+  cumulate_user: number;
+}
+
 // --- Batch dashboard response ---
 export interface DashboardData {
   articleSummary: { list: ArticleSummaryItem[] } | null;

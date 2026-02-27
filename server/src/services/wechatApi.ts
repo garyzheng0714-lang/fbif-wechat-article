@@ -76,6 +76,8 @@ const MAX_SPAN: Record<string, number> = {
   getuserreadhour: 1,
   getusershare: 7,
   getusersharehour: 1,
+  getusersummary: 7,
+  getusercumulate: 7,
 };
 
 export async function callWechatApi(

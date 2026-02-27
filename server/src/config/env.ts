@@ -16,6 +16,7 @@ const envSchema = z.object({
   FEISHU_APP_SECRET: z.string().default(''),
   FEISHU_BITABLE_APP_TOKEN: z.string().default(''),
   FEISHU_BITABLE_TABLE_ID: z.string().default(''),
+  FEISHU_BITABLE_TABLE_ID_USERS: z.string().default(''),
 });
 
 export const env = envSchema.parse(process.env);

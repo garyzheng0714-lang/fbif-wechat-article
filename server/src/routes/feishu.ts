@@ -7,6 +7,7 @@ import {
   syncUserReadToBitable,
   syncUserShareToBitable,
 } from '../services/feishuBitable.js';
+import { runDailySync, runBackfillSync } from '../services/scheduler.js';
 import type { ArticleRecord, UserGrowthRecord, UserReadRecord, UserShareRecord } from '../services/feishuBitable.js';
 import type {
   ArticleSummaryItem,
@@ -401,6 +402,24 @@ feishuRouter.post('/sync-all', async (req, res, next) => {
     console.log(`[Feishu Sync All] Done.`, JSON.stringify(results));
 
     res.json({ success: true, results });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ==================== 手动触发回填 ====================
+feishuRouter.post('/backfill', async (req, res, next) => {
+  try {
+    const schema = z.object({ days: z.coerce.number().min(1).max(365).default(60) });
+    const { days } = schema.parse(req.body);
+
+    console.log(`[Feishu Backfill] Starting ${days}-day backfill...`);
+    res.json({ success: true, message: `Backfill started for ${days} days. Check server logs for progress.` });
+
+    // Run in background so the HTTP response returns immediately
+    runBackfillSync(days).catch((err) => {
+      console.error('[Feishu Backfill] Failed:', err);
+    });
   } catch (err) {
     next(err);
   }

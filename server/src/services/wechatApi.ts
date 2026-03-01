@@ -1,4 +1,5 @@
 import { getToken, refreshTokenNow } from './wechatToken.js';
+import type { FreepublishItem, FreepublishNewsItem } from '../types/wechat.js';
 
 const WECHAT_API_BASE = 'https://api.weixin.qq.com/datacube';
 
@@ -76,6 +77,8 @@ const MAX_SPAN: Record<string, number> = {
   getuserreadhour: 1,
   getusershare: 7,
   getusersharehour: 1,
+  getusersummary: 7,
+  getusercumulate: 7,
 };
 
 export async function callWechatApi(
@@ -155,4 +158,85 @@ export async function callWechatApi(
   });
 
   return result;
+}
+
+// Fetch all published articles to get URLs, authors, digests, etc.
+// Uses freepublish/batchget API (not datacube)
+// Returns a map: title → FreepublishNewsItem
+let publishedArticlesCache: { data: Map<string, FreepublishNewsItem>; expiresAt: number } | null = null;
+
+export async function fetchPublishedArticles(): Promise<Map<string, FreepublishNewsItem>> {
+  // Cache for 1 hour since published article metadata rarely changes
+  if (publishedArticlesCache && Date.now() < publishedArticlesCache.expiresAt) {
+    return publishedArticlesCache.data;
+  }
+
+  const titleMap = new Map<string, FreepublishNewsItem>();
+  let offset = 0;
+  const count = 20;
+  let totalCount = Infinity;
+
+  while (offset < totalCount) {
+    const token = await getToken();
+    const url = `https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token=${token}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ offset, count, no_content: 1 }),
+    });
+
+    const data = (await res.json()) as {
+      errcode?: number;
+      errmsg?: string;
+      total_count?: number;
+      item_count?: number;
+      item?: FreepublishItem[];
+    };
+
+    // Handle token expiry
+    if (data.errcode === 40001) {
+      const newToken = await refreshTokenNow();
+      const retryUrl = `https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token=${newToken}`;
+      const retryRes = await fetch(retryUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ offset, count, no_content: 1 }),
+      });
+      const retryData = (await retryRes.json()) as typeof data;
+      if (retryData.errcode) {
+        console.error(`[WeChat] freepublish/batchget error: ${retryData.errcode} ${retryData.errmsg}`);
+        break;
+      }
+      Object.assign(data, retryData);
+    } else if (data.errcode) {
+      console.error(`[WeChat] freepublish/batchget error: ${data.errcode} ${data.errmsg}`);
+      break;
+    }
+
+    totalCount = data.total_count || 0;
+
+    if (data.item) {
+      for (const item of data.item) {
+        if (item.content?.news_item) {
+          for (const newsItem of item.content.news_item) {
+            if (newsItem.title) {
+              titleMap.set(newsItem.title, newsItem);
+            }
+          }
+        }
+      }
+    }
+
+    offset += count;
+    if (!data.item_count || data.item_count < count) break;
+  }
+
+  console.log(`[WeChat] Fetched ${titleMap.size} published articles metadata`);
+
+  publishedArticlesCache = {
+    data: titleMap,
+    expiresAt: Date.now() + 3600_000,
+  };
+
+  return titleMap;
 }

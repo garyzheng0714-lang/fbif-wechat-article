@@ -82,6 +82,38 @@ export interface UserShareHourItem extends UserShareItem {
   ref_hour: number;
 }
 
+// --- getusersummary response ---
+export interface UserSummaryItem {
+  ref_date: string;
+  user_source: number;
+  new_user: number;
+  cancel_user: number;
+}
+
+// --- getusercumulate response ---
+export interface UserCumulateItem {
+  ref_date: string;
+  cumulate_user: number;
+}
+
+// --- freepublish/batchget response ---
+export interface FreepublishNewsItem {
+  title: string;
+  url: string;
+  author: string;
+  digest: string;
+  thumb_url: string;
+  content_source_url: string;
+}
+
+export interface FreepublishItem {
+  article_id: string;
+  content: {
+    news_item: FreepublishNewsItem[];
+  };
+  update_time: number;
+}
+
 // --- Batch dashboard response ---
 export interface DashboardData {
   articleSummary: { list: ArticleSummaryItem[] } | null;

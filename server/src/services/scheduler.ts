@@ -15,7 +15,8 @@ import type {
   UserReadItem,
   UserShareItem,
 } from '../types/wechat.js';
-import { getTokenStatus } from './wechatToken.js';
+import { getToken } from './wechatToken.js';
+import { env } from '../config/env.js';
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -163,10 +164,13 @@ async function runFullSync(beginDate: string, endDate: string): Promise<SyncResu
  *     days: Number of days to look back from yesterday
  */
 export async function runDailySync(days: number = 7): Promise<void> {
-  if (getTokenStatus() === 'uninitialized') {
+  if (!env.WECHAT_APPID || !env.WECHAT_SECRET) {
     console.log('[Scheduler] Skipping sync: WeChat credentials not configured');
     return;
   }
+
+  // Ensure token is initialized before syncing
+  await getToken();
 
   const endDate = getYesterday();
   const beginDate = daysAgo(days);
@@ -184,10 +188,13 @@ export async function runDailySync(days: number = 7): Promise<void> {
  *     totalDays: Total number of days to backfill from yesterday
  */
 export async function runBackfillSync(totalDays: number = 60): Promise<void> {
-  if (getTokenStatus() === 'uninitialized') {
+  if (!env.WECHAT_APPID || !env.WECHAT_SECRET) {
     console.log('[Scheduler] Skipping backfill: WeChat credentials not configured');
     return;
   }
+
+  // Ensure token is initialized before syncing
+  await getToken();
 
   const yesterday = getYesterday();
   const chunkSize = 7;

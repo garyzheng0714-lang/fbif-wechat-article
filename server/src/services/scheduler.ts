@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { callWechatApi, fetchPublishedArticles } from './wechatApi.js';
+import { callWechatApi } from './wechatApi.js';
 import {
   syncArticleMasterToBitable,
   syncDailyArticleDataToBitable,
@@ -56,10 +56,9 @@ async function syncArticles(
   beginDate: string,
   endDate: string,
 ): Promise<{ master: { created: number; skipped: number }; daily: { created: number; skipped: number } }> {
-  const [summaryData, totalData, publishedMap] = await Promise.all([
+  const [summaryData, totalData] = await Promise.all([
     callWechatApi('getarticlesummary', beginDate, endDate),
     callWechatApi('getarticletotal', beginDate, endDate),
-    fetchPublishedArticles(),
   ]);
 
   const summaryItems = (summaryData.list || []) as ArticleSummaryItem[];
@@ -71,21 +70,15 @@ async function syncArticles(
   const dailyRecords: DailyArticleDataRecord[] = [];
 
   for (const item of summaryItems) {
+    const totalItem = totalMap.get(item.msgid);
+
     const master: ArticleMasterRecord = {
       title: item.title,
       refDate: item.ref_date,
       msgid: item.msgid,
       articleIndex: extractArticleIndex(item.msgid),
+      articleUrl: totalItem?.url,
     };
-
-    const published = publishedMap.get(item.title);
-    if (published) {
-      master.articleUrl = published.url;
-      master.author = published.author;
-      master.digest = published.digest;
-      master.thumbUrl = published.thumb_url;
-      master.contentSourceUrl = published.content_source_url;
-    }
 
     masterRecords.push(master);
 
@@ -102,7 +95,6 @@ async function syncArticles(
       addToFavCount: item.add_to_fav_count,
     };
 
-    const totalItem = totalMap.get(item.msgid);
     if (totalItem?.details?.length) {
       const d = totalItem.details[totalItem.details.length - 1];
       daily.targetUser = d.target_user;
@@ -144,14 +136,16 @@ async function syncUsers(
   const summaryItems = (summaryData.list || []) as UserSummaryItem[];
   const cumulateItems = (cumulateData.list || []) as UserCumulateItem[];
   const cumulateMap = new Map<string, number>();
-  for (const item of cumulateItems) cumulateMap.set(item.ref_date, item.cumulate_user);
+  for (const item of cumulateItems) {
+    cumulateMap.set(`${item.ref_date}_${item.user_source}`, item.cumulate_user);
+  }
 
   const records: UserGrowthRecord[] = summaryItems.map((item) => ({
     refDate: item.ref_date,
     userSource: item.user_source,
     newUser: item.new_user,
     cancelUser: item.cancel_user,
-    cumulateUser: cumulateMap.get(item.ref_date),
+    cumulateUser: cumulateMap.get(`${item.ref_date}_${item.user_source}`),
   }));
   const r = await syncUserGrowthToBitable(records);
   return { total: records.length, ...r };

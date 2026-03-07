@@ -47,6 +47,8 @@ export interface ArticleTotalItem {
   ref_date: string;
   msgid: string;
   title: string;
+  user_source: number;
+  url: string;
   details: ArticleTotalDetail[];
 }
 
@@ -93,23 +95,6 @@ export interface UserSummaryItem {
 // --- getusercumulate response ---
 export interface UserCumulateItem {
   ref_date: string;
+  user_source: number;
   cumulate_user: number;
-}
-
-// --- freepublish/batchget response ---
-export interface FreepublishNewsItem {
-  title: string;
-  url: string;
-  author: string;
-  digest: string;
-  thumb_url: string;
-  content_source_url: string;
-}
-
-export interface FreepublishItem {
-  article_id: string;
-  content: {
-    news_item: FreepublishNewsItem[];
-  };
-  update_time: number;
 }

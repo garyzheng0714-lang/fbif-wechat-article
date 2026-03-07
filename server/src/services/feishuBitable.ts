@@ -15,10 +15,6 @@ export interface ArticleMasterRecord {
   msgid: string;
   articleIndex?: number;
   articleUrl?: string;
-  author?: string;
-  digest?: string;
-  thumbUrl?: string;
-  contentSourceUrl?: string;
 }
 
 export interface DailyArticleDataRecord {
@@ -113,10 +109,6 @@ function toArticleMasterFields(record: ArticleMasterRecord): Record<string, unkn
 
   if (record.articleIndex !== undefined) fields['文章位置'] = record.articleIndex;
   if (record.articleUrl) fields['文章链接'] = { link: record.articleUrl, text: record.articleUrl };
-  if (record.author) fields['作者'] = record.author;
-  if (record.digest) fields['摘要'] = record.digest;
-  if (record.thumbUrl) fields['封面图'] = { link: record.thumbUrl, text: record.thumbUrl };
-  if (record.contentSourceUrl) fields['阅读原文链接'] = { link: record.contentSourceUrl, text: record.contentSourceUrl };
 
   return fields;
 }
@@ -362,10 +354,6 @@ const ARTICLE_MASTER_FIELDS: FieldSpec[] = [
   { name: '消息ID', type: FIELD_TYPE_TEXT },
   { name: '文章位置', type: FIELD_TYPE_NUMBER },
   { name: '文章链接', type: FIELD_TYPE_URL },
-  { name: '作者', type: FIELD_TYPE_TEXT },
-  { name: '摘要', type: FIELD_TYPE_TEXT },
-  { name: '封面图', type: FIELD_TYPE_URL },
-  { name: '阅读原文链接', type: FIELD_TYPE_URL },
   { name: '更新时间', type: FIELD_TYPE_DATETIME },
 ];
 

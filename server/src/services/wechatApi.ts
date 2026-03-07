@@ -1,6 +1,13 @@
 import { getToken, refreshTokenNow } from './wechatToken.js';
 import type { FreepublishItem, FreepublishNewsItem } from '../types/wechat.js';
 
+export class QuotaLimitError extends Error {
+  constructor(endpoint: string) {
+    super(`WeChat API daily quota limit reached for ${endpoint}`);
+    this.name = 'QuotaLimitError';
+  }
+}
+
 const WECHAT_API_BASE = 'https://api.weixin.qq.com/datacube';
 
 // In-memory response cache
@@ -108,10 +115,12 @@ export async function callWechatApi(
       const newToken = await refreshTokenNow();
       const retryData = (await callWechatApiSingle(endpoint, newToken, beginDate, endDate)) as Record<string, unknown>;
       if (retryData.errcode) {
+        if (String(retryData.errmsg).includes('quota')) throw new QuotaLimitError(endpoint);
         throw new Error(`WeChat API error ${retryData.errcode}: ${retryData.errmsg}`);
       }
       allItems = (retryData.list as unknown[]) || [];
     } else if (data.errcode) {
+      if (String(data.errmsg).includes('quota')) throw new QuotaLimitError(endpoint);
       throw new Error(`WeChat API error ${data.errcode}: ${data.errmsg}`);
     } else {
       allItems = (data.list as unknown[]) || [];
@@ -132,12 +141,14 @@ export async function callWechatApi(
           const newToken = await refreshTokenNow();
           const retryData = (await callWechatApiSingle(endpoint, newToken, begin, end)) as Record<string, unknown>;
           if (retryData.errcode) {
+            if (String(retryData.errmsg).includes('quota')) throw new QuotaLimitError(endpoint);
             console.error(`WeChat API error for ${endpoint} [${begin}~${end}]:`, retryData.errmsg);
             return [];
           }
           return (retryData.list as unknown[]) || [];
         }
         if (data.errcode) {
+          if (String(data.errmsg).includes('quota')) throw new QuotaLimitError(endpoint);
           console.error(`WeChat API error for ${endpoint} [${begin}~${end}]:`, data.errmsg);
           return [];
         }

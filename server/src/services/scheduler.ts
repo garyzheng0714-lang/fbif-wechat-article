@@ -25,6 +25,7 @@ import type {
 import { getToken } from './wechatToken.js';
 import { env } from '../config/env.js';
 import { readCursor, writeCursor } from './syncCursor.js';
+import { QuotaLimitError } from './wechatApi.js';
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -203,6 +204,7 @@ async function runFullSync(beginDate: string, endDate: string): Promise<SyncResu
     try {
       results[task.name] = await task.fn();
     } catch (err) {
+      if (err instanceof QuotaLimitError) throw err;
       results[task.name] = { error: err instanceof Error ? err.message : String(err) };
       console.error(`[Scheduler] ${task.name} sync failed:`, err);
     }
@@ -288,11 +290,22 @@ export async function runBackfillSync(): Promise<void> {
 
   let currentEnd = addDays(startFrom, -1);
 
-  for (let i = 0; i < 104; i++) {
+  for (let i = 0; i < 200; i++) {
     const chunkBegin = addDays(currentEnd, -(chunkSize - 1));
 
     console.log(`[Scheduler] Backfill chunk: ${chunkBegin} ~ ${currentEnd}`);
-    const results = await runFullSync(chunkBegin, currentEnd);
+
+    let results: SyncResult;
+    try {
+      results = await runFullSync(chunkBegin, currentEnd);
+    } catch (err) {
+      if (err instanceof QuotaLimitError) {
+        console.log(`[Scheduler] API quota limit reached, pausing backfill. Will resume next run.`);
+        return;
+      }
+      throw err;
+    }
+
     console.log(`[Scheduler] Chunk done:`, JSON.stringify(results));
 
     const allEmpty = isAllEmpty(results);
@@ -331,6 +344,7 @@ export function startScheduler(): void {
     console.log(`[Scheduler] Cron triggered at ${new Date().toISOString()}`);
     try {
       await runDailySync();
+      await runBackfillSync();
     } catch (err) {
       console.error('[Scheduler] Cron sync failed:', err);
     }

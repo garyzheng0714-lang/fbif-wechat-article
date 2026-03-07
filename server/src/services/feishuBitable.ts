@@ -9,10 +9,21 @@ interface BitableRecord {
   fields: Record<string, unknown>;
 }
 
-interface ArticleRecord {
+export interface ArticleMasterRecord {
   title: string;
   refDate: string;
   msgid: string;
+  articleIndex?: number;
+  articleUrl?: string;
+  author?: string;
+  digest?: string;
+  thumbUrl?: string;
+  contentSourceUrl?: string;
+}
+
+export interface DailyArticleDataRecord {
+  msgid: string;
+  refDate: string;
   intPageReadUser: number;
   intPageReadCount: number;
   oriPageReadUser: number;
@@ -21,7 +32,6 @@ interface ArticleRecord {
   shareCount: number;
   addToFavUser: number;
   addToFavCount: number;
-  // getarticletotal 来源字段
   targetUser?: number;
   intPageFromSessionReadUser?: number;
   intPageFromSessionReadCount?: number;
@@ -33,16 +43,9 @@ interface ArticleRecord {
   intPageFromFriendsReadCount?: number;
   intPageFromOtherReadUser?: number;
   intPageFromOtherReadCount?: number;
-  articleIndex?: number;
-  // freepublish 文章元数据
-  articleUrl?: string;
-  author?: string;
-  digest?: string;
-  thumbUrl?: string;
-  contentSourceUrl?: string;
 }
 
-interface UserGrowthRecord {
+export interface UserGrowthRecord {
   refDate: string;
   userSource: number;
   newUser: number;
@@ -50,7 +53,7 @@ interface UserGrowthRecord {
   cumulateUser?: number;
 }
 
-interface UserReadRecord {
+export interface UserReadRecord {
   refDate: string;
   userSource: number;
   intPageReadUser: number;
@@ -63,7 +66,7 @@ interface UserReadRecord {
   addToFavCount: number;
 }
 
-interface UserShareRecord {
+export interface UserShareRecord {
   refDate: string;
   shareScene: number;
   shareUser: number;
@@ -73,75 +76,79 @@ interface UserShareRecord {
 // ==================== Label Maps ====================
 
 const USER_SOURCE_LABELS: Record<number, string> = {
-  0: '其他',
-  1: '搜索',
-  17: '名片分享',
-  30: '扫码',
-  57: '文章内账号名',
-  100: '微信广告',
-  161: '他人转载',
-  149: '小程序关注',
-  200: '视频号',
-  201: '直播',
+  0: '其他', 1: '搜索', 17: '名片分享', 30: '扫码',
+  57: '文章内账号名', 100: '微信广告', 161: '他人转载',
+  149: '小程序关注', 200: '视频号', 201: '直播',
 };
 
 const READ_SOURCE_LABELS: Record<number, string> = {
-  0: '会话',
-  1: '好友',
-  2: '朋友圈',
-  4: '历史消息',
-  5: '其他',
-  6: '看一看',
-  7: '搜一搜',
-  99999999: '全部',
+  0: '会话', 1: '好友', 2: '朋友圈', 4: '历史消息',
+  5: '其他', 6: '看一看', 7: '搜一搜', 99999999: '全部',
 };
 
 const SHARE_SCENE_LABELS: Record<number, string> = {
-  1: '好友转发',
-  2: '朋友圈',
-  255: '其他',
+  1: '好友转发', 2: '朋友圈', 255: '其他',
 };
 
 // ==================== Field Mappers ====================
 
-function toBitableFields(article: ArticleRecord): Record<string, unknown> {
-  const dateMs = new Date(article.refDate).getTime();
+function toArticleMasterFields(record: ArticleMasterRecord): Record<string, unknown> {
+  const dateMs = new Date(record.refDate).getTime();
+  const publishDate = new Date(record.refDate);
+  const publishMonth = `${publishDate.getFullYear()}-${String(publishDate.getMonth() + 1).padStart(2, '0')}`;
+  const publishHour = `${String(publishDate.getHours()).padStart(2, '0')}:00`;
 
   const fields: Record<string, unknown> = {
-    '文章标题': article.title,
+    '文章标题': record.title,
     '发布日期': dateMs,
-    '消息ID': article.msgid,
-    '图文页阅读人数': article.intPageReadUser,
-    '图文页阅读次数': article.intPageReadCount,
-    '原文页阅读人数': article.oriPageReadUser,
-    '原文页阅读次数': article.oriPageReadCount,
-    '分享人数': article.shareUser,
-    '分享次数': article.shareCount,
-    '收藏人数': article.addToFavUser,
-    '收藏次数': article.addToFavCount,
+    '发布月份': publishMonth,
+    '消息ID': record.msgid,
     '更新时间': Date.now(),
   };
 
-  if (article.targetUser !== undefined) {
-    fields['送达人数'] = article.targetUser;
-    fields['会话阅读人数'] = article.intPageFromSessionReadUser ?? 0;
-    fields['会话阅读次数'] = article.intPageFromSessionReadCount ?? 0;
-    fields['历史消息阅读人数'] = article.intPageFromHistMsgReadUser ?? 0;
-    fields['历史消息阅读次数'] = article.intPageFromHistMsgReadCount ?? 0;
-    fields['朋友圈阅读人数'] = article.intPageFromFeedReadUser ?? 0;
-    fields['朋友圈阅读次数'] = article.intPageFromFeedReadCount ?? 0;
-    fields['好友转发阅读人数'] = article.intPageFromFriendsReadUser ?? 0;
-    fields['好友转发阅读次数'] = article.intPageFromFriendsReadCount ?? 0;
-    fields['其他来源阅读人数'] = article.intPageFromOtherReadUser ?? 0;
-    fields['其他来源阅读次数'] = article.intPageFromOtherReadCount ?? 0;
-  }
+  if (record.articleIndex !== undefined) fields['文章位置'] = record.articleIndex;
+  if (record.articleUrl) fields['文章链接'] = { link: record.articleUrl, text: record.articleUrl };
+  if (record.author) fields['作者'] = record.author;
+  if (record.digest) fields['摘要'] = record.digest;
+  if (record.thumbUrl) fields['封面图'] = { link: record.thumbUrl, text: record.thumbUrl };
+  if (record.contentSourceUrl) fields['阅读原文链接'] = { link: record.contentSourceUrl, text: record.contentSourceUrl };
+  if (publishHour !== '00:00') fields['几点发布'] = publishHour;
 
-  if (article.articleIndex !== undefined) fields['文章位置'] = article.articleIndex;
-  if (article.articleUrl) fields['文章链接'] = { link: article.articleUrl, text: article.articleUrl };
-  if (article.author) fields['作者'] = article.author;
-  if (article.digest) fields['摘要'] = article.digest;
-  if (article.thumbUrl) fields['封面图'] = { link: article.thumbUrl, text: article.thumbUrl };
-  if (article.contentSourceUrl) fields['阅读原文链接'] = { link: article.contentSourceUrl, text: article.contentSourceUrl };
+  return fields;
+}
+
+function toDailyArticleDataFields(record: DailyArticleDataRecord): Record<string, unknown> {
+  const dateMs = new Date(record.refDate).getTime();
+  const uniqueKey = `${record.msgid}_${record.refDate}`;
+
+  const fields: Record<string, unknown> = {
+    '唯一键': uniqueKey,
+    '消息ID': record.msgid,
+    '日期': dateMs,
+    '图文页阅读人数': record.intPageReadUser,
+    '图文页阅读次数': record.intPageReadCount,
+    '原文页阅读人数': record.oriPageReadUser,
+    '原文页阅读次数': record.oriPageReadCount,
+    '分享人数': record.shareUser,
+    '分享次数': record.shareCount,
+    '收藏人数': record.addToFavUser,
+    '收藏次数': record.addToFavCount,
+    '更新时间': Date.now(),
+  };
+
+  if (record.targetUser !== undefined) {
+    fields['送达人数'] = record.targetUser;
+    fields['会话阅读人数'] = record.intPageFromSessionReadUser ?? 0;
+    fields['会话阅读次数'] = record.intPageFromSessionReadCount ?? 0;
+    fields['历史消息阅读人数'] = record.intPageFromHistMsgReadUser ?? 0;
+    fields['历史消息阅读次数'] = record.intPageFromHistMsgReadCount ?? 0;
+    fields['朋友圈阅读人数'] = record.intPageFromFeedReadUser ?? 0;
+    fields['朋友圈阅读次数'] = record.intPageFromFeedReadCount ?? 0;
+    fields['好友转发阅读人数'] = record.intPageFromFriendsReadUser ?? 0;
+    fields['好友转发阅读次数'] = record.intPageFromFriendsReadCount ?? 0;
+    fields['其他来源阅读人数'] = record.intPageFromOtherReadUser ?? 0;
+    fields['其他来源阅读次数'] = record.intPageFromOtherReadCount ?? 0;
+  }
 
   return fields;
 }
@@ -226,7 +233,6 @@ async function feishuRequest(method: string, path: string, body?: unknown, table
   return data.data;
 }
 
-// App-level request (not table-scoped)
 async function feishuAppRequest(method: string, path: string, body?: unknown): Promise<unknown> {
   const token = await getFeishuToken();
   const url = `${BITABLE_API}/${env.FEISHU_BITABLE_APP_TOKEN}${path}`;
@@ -251,15 +257,12 @@ async function feishuAppRequest(method: string, path: string, body?: unknown): P
 
 // ==================== Auto Table Creation ====================
 
-// In-memory cache: table name → table_id
 const tableIdCache = new Map<string, string>();
 
 async function getOrCreateTable(tableName: string): Promise<string> {
-  // Check cache
   const cached = tableIdCache.get(tableName);
   if (cached) return cached;
 
-  // List all existing tables
   const result = (await feishuAppRequest('GET', '/tables')) as {
     items?: { name: string; table_id: string }[];
     has_more: boolean;
@@ -271,14 +274,12 @@ async function getOrCreateTable(tableName: string): Promise<string> {
     }
   }
 
-  // Found existing table
   const existing = tableIdCache.get(tableName);
   if (existing) {
     console.log(`[Feishu] Found existing table "${tableName}" (${existing})`);
     return existing;
   }
 
-  // Create new table
   console.log(`[Feishu] Creating new table: ${tableName}`);
   const createResult = (await feishuAppRequest('POST', '/tables', {
     table: { name: tableName },
@@ -344,10 +345,25 @@ async function ensureFieldsExist(requiredFields: FieldSpec[], tableId: string): 
 
 // ==================== Field Specs ====================
 
-const ARTICLE_FIELDS: FieldSpec[] = [
+const ARTICLE_MASTER_FIELDS: FieldSpec[] = [
   { name: '文章标题', type: FIELD_TYPE_TEXT },
   { name: '发布日期', type: FIELD_TYPE_DATETIME },
+  { name: '发布月份', type: FIELD_TYPE_TEXT },
   { name: '消息ID', type: FIELD_TYPE_TEXT },
+  { name: '文章位置', type: FIELD_TYPE_NUMBER },
+  { name: '文章链接', type: FIELD_TYPE_URL },
+  { name: '作者', type: FIELD_TYPE_TEXT },
+  { name: '摘要', type: FIELD_TYPE_TEXT },
+  { name: '封面图', type: FIELD_TYPE_URL },
+  { name: '阅读原文链接', type: FIELD_TYPE_URL },
+  { name: '几点发布', type: FIELD_TYPE_TEXT },
+  { name: '更新时间', type: FIELD_TYPE_DATETIME },
+];
+
+const DAILY_ARTICLE_DATA_FIELDS: FieldSpec[] = [
+  { name: '唯一键', type: FIELD_TYPE_TEXT },
+  { name: '消息ID', type: FIELD_TYPE_TEXT },
+  { name: '日期', type: FIELD_TYPE_DATETIME },
   { name: '图文页阅读人数', type: FIELD_TYPE_NUMBER },
   { name: '图文页阅读次数', type: FIELD_TYPE_NUMBER },
   { name: '原文页阅读人数', type: FIELD_TYPE_NUMBER },
@@ -356,7 +372,6 @@ const ARTICLE_FIELDS: FieldSpec[] = [
   { name: '分享次数', type: FIELD_TYPE_NUMBER },
   { name: '收藏人数', type: FIELD_TYPE_NUMBER },
   { name: '收藏次数', type: FIELD_TYPE_NUMBER },
-  { name: '更新时间', type: FIELD_TYPE_DATETIME },
   { name: '送达人数', type: FIELD_TYPE_NUMBER },
   { name: '会话阅读人数', type: FIELD_TYPE_NUMBER },
   { name: '会话阅读次数', type: FIELD_TYPE_NUMBER },
@@ -368,12 +383,7 @@ const ARTICLE_FIELDS: FieldSpec[] = [
   { name: '好友转发阅读次数', type: FIELD_TYPE_NUMBER },
   { name: '其他来源阅读人数', type: FIELD_TYPE_NUMBER },
   { name: '其他来源阅读次数', type: FIELD_TYPE_NUMBER },
-  { name: '文章位置', type: FIELD_TYPE_NUMBER },
-  { name: '文章链接', type: FIELD_TYPE_URL },
-  { name: '作者', type: FIELD_TYPE_TEXT },
-  { name: '摘要', type: FIELD_TYPE_TEXT },
-  { name: '封面图', type: FIELD_TYPE_URL },
-  { name: '阅读原文链接', type: FIELD_TYPE_URL },
+  { name: '更新时间', type: FIELD_TYPE_DATETIME },
 ];
 
 const USER_GROWTH_FIELDS: FieldSpec[] = [
@@ -447,14 +457,43 @@ async function getExistingRecords(keyField: string, tableId: string): Promise<Ma
   return recordMap;
 }
 
-async function syncRecordsToBitable(
+async function syncRecordsInsertOnly(
+  records: { uniqueKey: string; fields: Record<string, unknown> }[],
+  keyField: string,
+  tableId: string,
+): Promise<{ created: number; skipped: number }> {
+  if (records.length === 0) return { created: 0, skipped: 0 };
+
+  const existingRecords = await getExistingRecords(keyField, tableId);
+
+  const createList: BitableRecord[] = [];
+  let skipped = 0;
+
+  for (const record of records) {
+    if (existingRecords.has(record.uniqueKey)) {
+      skipped++;
+    } else {
+      createList.push({ fields: record.fields });
+    }
+  }
+
+  let created = 0;
+  for (let i = 0; i < createList.length; i += 500) {
+    const batch = createList.slice(i, i + 500);
+    await feishuRequest('POST', '/records/batch_create', { records: batch }, tableId);
+    created += batch.length;
+    console.log(`[Feishu] Batch created ${batch.length} records (${created}/${createList.length})`);
+  }
+
+  return { created, skipped };
+}
+
+async function syncRecordsUpsert(
   records: { uniqueKey: string; fields: Record<string, unknown> }[],
   keyField: string,
   tableId: string,
 ): Promise<{ created: number; updated: number }> {
-  if (records.length === 0) {
-    return { created: 0, updated: 0 };
-  }
+  if (records.length === 0) return { created: 0, updated: 0 };
 
   const existingRecords = await getExistingRecords(keyField, tableId);
 
@@ -463,7 +502,6 @@ async function syncRecordsToBitable(
 
   for (const record of records) {
     const existingRecordId = existingRecords.get(record.uniqueKey);
-
     if (existingRecordId) {
       updateList.push({ record_id: existingRecordId, fields: record.fields });
     } else {
@@ -490,21 +528,64 @@ async function syncRecordsToBitable(
   return { created, updated };
 }
 
+// ==================== Clear Records ====================
+
+export async function clearTableRecords(tableId: string): Promise<number> {
+  let deleted = 0;
+  let hasMore = true;
+
+  while (hasMore) {
+    const result = (await feishuRequest('GET', '/records?page_size=500', undefined, tableId)) as {
+      items?: { record_id: string }[];
+      has_more: boolean;
+    };
+
+    if (!result.items || result.items.length === 0) break;
+
+    const ids = result.items.map((item) => item.record_id);
+    await feishuRequest('POST', '/records/batch_delete', { records: ids }, tableId);
+    deleted += ids.length;
+    console.log(`[Feishu] Deleted ${ids.length} records (total: ${deleted})`);
+
+    hasMore = result.has_more;
+  }
+
+  return deleted;
+}
+
 // ==================== Public Sync Functions ====================
 
-export async function syncArticlesToBitable(articles: ArticleRecord[]): Promise<{ created: number; updated: number }> {
+export async function syncArticleMasterToBitable(
+  articles: ArticleMasterRecord[],
+): Promise<{ created: number; skipped: number }> {
   const tableId = env.FEISHU_BITABLE_TABLE_ID;
-  await ensureFieldsExist(ARTICLE_FIELDS, tableId);
+  await ensureFieldsExist(ARTICLE_MASTER_FIELDS, tableId);
 
   const records = articles.map((article) => ({
     uniqueKey: article.msgid,
-    fields: toBitableFields(article),
+    fields: toArticleMasterFields(article),
   }));
 
-  return syncRecordsToBitable(records, '消息ID', tableId);
+  return syncRecordsInsertOnly(records, '消息ID', tableId);
 }
 
-export async function syncUserGrowthToBitable(userRecords: UserGrowthRecord[]): Promise<{ created: number; updated: number }> {
+export async function syncDailyArticleDataToBitable(
+  data: DailyArticleDataRecord[],
+): Promise<{ created: number; skipped: number }> {
+  const tableId = await getOrCreateTable('每日文章数据');
+  await ensureFieldsExist(DAILY_ARTICLE_DATA_FIELDS, tableId);
+
+  const records = data.map((record) => ({
+    uniqueKey: `${record.msgid}_${record.refDate}`,
+    fields: toDailyArticleDataFields(record),
+  }));
+
+  return syncRecordsInsertOnly(records, '唯一键', tableId);
+}
+
+export async function syncUserGrowthToBitable(
+  userRecords: UserGrowthRecord[],
+): Promise<{ created: number; updated: number }> {
   const tableId = await getOrCreateTable('粉丝增长');
   await ensureFieldsExist(USER_GROWTH_FIELDS, tableId);
 
@@ -515,10 +596,12 @@ export async function syncUserGrowthToBitable(userRecords: UserGrowthRecord[]): 
     return { uniqueKey, fields };
   });
 
-  return syncRecordsToBitable(records, '唯一键', tableId);
+  return syncRecordsUpsert(records, '唯一键', tableId);
 }
 
-export async function syncUserReadToBitable(readRecords: UserReadRecord[]): Promise<{ created: number; updated: number }> {
+export async function syncUserReadToBitable(
+  readRecords: UserReadRecord[],
+): Promise<{ created: number; updated: number }> {
   const tableId = await getOrCreateTable('每日阅读概况');
   await ensureFieldsExist(USER_READ_FIELDS, tableId);
 
@@ -529,10 +612,12 @@ export async function syncUserReadToBitable(readRecords: UserReadRecord[]): Prom
     return { uniqueKey, fields };
   });
 
-  return syncRecordsToBitable(records, '唯一键', tableId);
+  return syncRecordsUpsert(records, '唯一键', tableId);
 }
 
-export async function syncUserShareToBitable(shareRecords: UserShareRecord[]): Promise<{ created: number; updated: number }> {
+export async function syncUserShareToBitable(
+  shareRecords: UserShareRecord[],
+): Promise<{ created: number; updated: number }> {
   const tableId = await getOrCreateTable('分享场景');
   await ensureFieldsExist(USER_SHARE_FIELDS, tableId);
 
@@ -543,7 +628,14 @@ export async function syncUserShareToBitable(shareRecords: UserShareRecord[]): P
     return { uniqueKey, fields };
   });
 
-  return syncRecordsToBitable(records, '唯一键', tableId);
+  return syncRecordsUpsert(records, '唯一键', tableId);
 }
 
-export type { ArticleRecord, UserGrowthRecord, UserReadRecord, UserShareRecord };
+export async function clearArticleMasterTable(): Promise<number> {
+  return clearTableRecords(env.FEISHU_BITABLE_TABLE_ID);
+}
+
+export async function clearDailyArticleDataTable(): Promise<number> {
+  const tableId = await getOrCreateTable('每日文章数据');
+  return clearTableRecords(tableId);
+}

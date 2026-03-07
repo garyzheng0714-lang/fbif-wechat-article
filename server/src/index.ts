@@ -8,7 +8,7 @@ import { wechatRouter } from './routes/wechat.js';
 import { configRouter } from './routes/config.js';
 import { feishuRouter } from './routes/feishu.js';
 import { getTokenStatus } from './services/wechatToken.js';
-import { startScheduler, runBackfillSync } from './services/scheduler.js';
+import { startScheduler, runDailySync, runBackfillSync } from './services/scheduler.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -40,8 +40,13 @@ app.listen(env.SERVER_PORT, () => {
 
   startScheduler();
 
-  // On startup, backfill the last 60 days in background
-  runBackfillSync(60).catch((err) => {
-    console.error('[Startup] Backfill sync failed:', err);
-  });
+  // Cursor-driven startup: daily sync first, then backfill
+  (async () => {
+    try {
+      await runDailySync();
+      await runBackfillSync();
+    } catch (err) {
+      console.error('[Startup] Sync failed:', err);
+    }
+  })();
 });

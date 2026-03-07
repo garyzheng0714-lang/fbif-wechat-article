@@ -1,10 +1,7 @@
 import { Router } from 'express';
 import { runDailySync, runBackfillSync } from '../services/scheduler.js';
 import { readCursor, deleteCursor } from '../services/syncCursor.js';
-import {
-  clearArticleMasterTable,
-  clearDailyArticleDataTable,
-} from '../services/feishuBitable.js';
+import { clearAllTables } from '../services/feishuBitable.js';
 
 export const feishuRouter = Router();
 
@@ -47,22 +44,17 @@ feishuRouter.get('/cursor', (_req, res) => {
 // ==================== 重置（清空数据+游标） ====================
 feishuRouter.post('/reset', async (_req, res, next) => {
   try {
-    console.log('[Feishu Route] Resetting all article data...');
+    console.log('[Feishu Route] Resetting all data...');
 
-    const [masterDeleted, dailyDeleted] = await Promise.all([
-      clearArticleMasterTable(),
-      clearDailyArticleDataTable(),
-    ]);
-
+    const deleted = await clearAllTables();
     deleteCursor();
 
-    console.log(`[Feishu Route] Reset complete. Master: ${masterDeleted}, Daily: ${dailyDeleted}`);
+    console.log(`[Feishu Route] Reset complete:`, deleted);
 
     res.json({
       success: true,
-      message: 'All article data cleared and cursor reset',
-      masterDeleted,
-      dailyDeleted,
+      message: 'All data cleared and cursor reset',
+      deleted,
     });
   } catch (err) {
     next(err);

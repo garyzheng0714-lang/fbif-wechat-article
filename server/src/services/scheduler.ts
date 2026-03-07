@@ -116,6 +116,12 @@ async function syncArticles(
       daily.intPageFromFriendsReadCount = d.int_page_from_friends_read_count;
       daily.intPageFromOtherReadUser = d.int_page_from_other_read_user;
       daily.intPageFromOtherReadCount = d.int_page_from_other_read_count;
+      daily.feedShareFromSessionUser = d.feed_share_from_session_user;
+      daily.feedShareFromSessionCnt = d.feed_share_from_session_cnt;
+      daily.feedShareFromFeedUser = d.feed_share_from_feed_user;
+      daily.feedShareFromFeedCnt = d.feed_share_from_feed_cnt;
+      daily.feedShareFromOtherUser = d.feed_share_from_other_user;
+      daily.feedShareFromOtherCnt = d.feed_share_from_other_cnt;
     }
 
     dailyRecords.push(daily);

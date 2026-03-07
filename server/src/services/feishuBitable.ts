@@ -43,6 +43,12 @@ export interface DailyArticleDataRecord {
   intPageFromFriendsReadCount?: number;
   intPageFromOtherReadUser?: number;
   intPageFromOtherReadCount?: number;
+  feedShareFromSessionUser?: number;
+  feedShareFromSessionCnt?: number;
+  feedShareFromFeedUser?: number;
+  feedShareFromFeedCnt?: number;
+  feedShareFromOtherUser?: number;
+  feedShareFromOtherCnt?: number;
 }
 
 export interface UserGrowthRecord {
@@ -96,7 +102,6 @@ function toArticleMasterFields(record: ArticleMasterRecord): Record<string, unkn
   const dateMs = new Date(record.refDate).getTime();
   const publishDate = new Date(record.refDate);
   const publishMonth = `${publishDate.getFullYear()}-${String(publishDate.getMonth() + 1).padStart(2, '0')}`;
-  const publishHour = `${String(publishDate.getHours()).padStart(2, '0')}:00`;
 
   const fields: Record<string, unknown> = {
     '文章标题': record.title,
@@ -112,7 +117,6 @@ function toArticleMasterFields(record: ArticleMasterRecord): Record<string, unkn
   if (record.digest) fields['摘要'] = record.digest;
   if (record.thumbUrl) fields['封面图'] = { link: record.thumbUrl, text: record.thumbUrl };
   if (record.contentSourceUrl) fields['阅读原文链接'] = { link: record.contentSourceUrl, text: record.contentSourceUrl };
-  if (publishHour !== '00:00') fields['几点发布'] = publishHour;
 
   return fields;
 }
@@ -148,6 +152,12 @@ function toDailyArticleDataFields(record: DailyArticleDataRecord): Record<string
     fields['好友转发阅读次数'] = record.intPageFromFriendsReadCount ?? 0;
     fields['其他来源阅读人数'] = record.intPageFromOtherReadUser ?? 0;
     fields['其他来源阅读次数'] = record.intPageFromOtherReadCount ?? 0;
+    fields['会话转发分享人数'] = record.feedShareFromSessionUser ?? 0;
+    fields['会话转发分享次数'] = record.feedShareFromSessionCnt ?? 0;
+    fields['朋友圈转发分享人数'] = record.feedShareFromFeedUser ?? 0;
+    fields['朋友圈转发分享次数'] = record.feedShareFromFeedCnt ?? 0;
+    fields['其他转发分享人数'] = record.feedShareFromOtherUser ?? 0;
+    fields['其他转发分享次数'] = record.feedShareFromOtherCnt ?? 0;
   }
 
   return fields;
@@ -356,7 +366,6 @@ const ARTICLE_MASTER_FIELDS: FieldSpec[] = [
   { name: '摘要', type: FIELD_TYPE_TEXT },
   { name: '封面图', type: FIELD_TYPE_URL },
   { name: '阅读原文链接', type: FIELD_TYPE_URL },
-  { name: '几点发布', type: FIELD_TYPE_TEXT },
   { name: '更新时间', type: FIELD_TYPE_DATETIME },
 ];
 
@@ -383,6 +392,12 @@ const DAILY_ARTICLE_DATA_FIELDS: FieldSpec[] = [
   { name: '好友转发阅读次数', type: FIELD_TYPE_NUMBER },
   { name: '其他来源阅读人数', type: FIELD_TYPE_NUMBER },
   { name: '其他来源阅读次数', type: FIELD_TYPE_NUMBER },
+  { name: '会话转发分享人数', type: FIELD_TYPE_NUMBER },
+  { name: '会话转发分享次数', type: FIELD_TYPE_NUMBER },
+  { name: '朋友圈转发分享人数', type: FIELD_TYPE_NUMBER },
+  { name: '朋友圈转发分享次数', type: FIELD_TYPE_NUMBER },
+  { name: '其他转发分享人数', type: FIELD_TYPE_NUMBER },
+  { name: '其他转发分享次数', type: FIELD_TYPE_NUMBER },
   { name: '更新时间', type: FIELD_TYPE_DATETIME },
 ];
 
@@ -631,11 +646,19 @@ export async function syncUserShareToBitable(
   return syncRecordsUpsert(records, '唯一键', tableId);
 }
 
-export async function clearArticleMasterTable(): Promise<number> {
-  return clearTableRecords(env.FEISHU_BITABLE_TABLE_ID);
-}
+export async function clearAllTables(): Promise<Record<string, number>> {
+  const tables = [
+    { name: '文章主表', getTableId: async () => env.FEISHU_BITABLE_TABLE_ID },
+    { name: '每日文章数据', getTableId: () => getOrCreateTable('每日文章数据') },
+    { name: '粉丝增长', getTableId: () => getOrCreateTable('粉丝增长') },
+    { name: '每日阅读概况', getTableId: () => getOrCreateTable('每日阅读概况') },
+    { name: '分享场景', getTableId: () => getOrCreateTable('分享场景') },
+  ];
 
-export async function clearDailyArticleDataTable(): Promise<number> {
-  const tableId = await getOrCreateTable('每日文章数据');
-  return clearTableRecords(tableId);
+  const result: Record<string, number> = {};
+  for (const table of tables) {
+    const tableId = await table.getTableId();
+    result[table.name] = await clearTableRecords(tableId);
+  }
+  return result;
 }

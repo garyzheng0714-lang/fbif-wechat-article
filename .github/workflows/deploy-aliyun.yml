@@ -41,7 +41,6 @@ jobs:
             --exclude="release.tgz" \
             --exclude="./release.tgz" \
             --exclude="node_modules" \
-            --exclude="client/node_modules" \
             --exclude="server/node_modules" \
             --exclude=".env" \
             --exclude=".env.*" \

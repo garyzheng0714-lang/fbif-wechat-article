@@ -113,13 +113,3 @@ export interface FreepublishItem {
   };
   update_time: number;
 }
-
-// --- Batch dashboard response ---
-export interface DashboardData {
-  articleSummary: { list: ArticleSummaryItem[] } | null;
-  articleTotal: { list: ArticleTotalItem[] } | null;
-  userRead: { list: UserReadItem[] } | null;
-  userReadHour: { list: UserReadHourItem[] } | null;
-  userShare: { list: UserShareItem[] } | null;
-  userShareHour: { list: UserShareHourItem[] } | null;
-}

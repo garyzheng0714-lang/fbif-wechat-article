@@ -9,7 +9,6 @@ dotenv.config({ path: resolve(__dirname, '../../../.env') });
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   SERVER_PORT: z.coerce.number().default(3001),
-  CLIENT_ORIGIN: z.string().default('http://localhost:5173'),
   WECHAT_APPID: z.string().default(''),
   WECHAT_SECRET: z.string().default(''),
   FEISHU_APP_ID: z.string().default(''),

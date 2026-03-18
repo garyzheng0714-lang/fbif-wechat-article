@@ -1,9 +1,9 @@
-node_modules/
-dist/
 .env
 .env.local
 *.log
 .DS_Store
-.vite/
-*.tsbuildinfo
+.sync-cursor.json
+wechat-sync
+screenshots/
 .claude/
+.context/

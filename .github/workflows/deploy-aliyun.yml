@@ -19,34 +19,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          node-version: "20"
-          cache: "npm"
+          go-version: "1.26"
+
+      - name: Test
+        run: go test ./...
 
       - name: Build
         run: |
           set -euo pipefail
-          npm ci
-          npm run build
-
-      - name: Package Release
-        run: |
-          set -euo pipefail
-          rm -f /tmp/release.tgz release.tgz
-          tar -czf /tmp/release.tgz \
-            --exclude=".git" \
-            --exclude=".github" \
-            --exclude="release.tgz" \
-            --exclude="./release.tgz" \
-            --exclude="node_modules" \
-            --exclude="server/node_modules" \
-            --exclude=".env" \
-            --exclude=".env.*" \
-            --exclude=".local-stack" \
-            .
-          cp /tmp/release.tgz release.tgz
+          GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 
       - name: Validate SSH Key
         env:
@@ -113,7 +97,7 @@ jobs:
 
           grep -q "SSH_OK" /tmp/ssh_probe_out.log
 
-      - name: Upload Release To Server
+      - name: Upload Binary To Server
         env:
           ALIYUN_HOST: ${{ secrets.ALIYUN_HOST }}
           ALIYUN_USER: ${{ secrets.ALIYUN_USER }}
@@ -127,8 +111,8 @@ jobs:
             -o BatchMode=yes \
             -o ConnectTimeout=20 \
             -o StrictHostKeyChecking=accept-new \
-            release.tgz \
-            "${USER}@${HOST}:/tmp/release.tgz"
+            wechat-sync \
+            "${USER}@${HOST}:/tmp/wechat-sync"
 
       - name: Deploy On Server
         env:
@@ -136,7 +120,6 @@ jobs:
           ALIYUN_USER: ${{ secrets.ALIYUN_USER }}
           APP_DIR: ${{ secrets.APP_DIR }}
           APP_ENV_B64: ${{ secrets.APP_ENV_B64 }}
-          GH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           HOST="${ALIYUN_HOST:-112.124.103.65}"
@@ -146,58 +129,67 @@ jobs:
             set -euo pipefail
 
             APP_ROOT="${APP_DIR:-/opt/fbif-wechat-article-dashboard}"
-            RELEASES_DIR="${APP_ROOT}/releases"
-            CURRENT_LINK="${APP_ROOT}/current"
-            RELEASE_DIR="${RELEASES_DIR}/${GH_SHA}"
+            BIN_DIR="${APP_ROOT}/bin"
+            BINARY="${BIN_DIR}/wechat-sync"
+            SERVICE_NAME="wechat-sync"
 
-            mkdir -p "${RELEASES_DIR}"
-            rm -rf "${RELEASE_DIR}"
-            mkdir -p "${RELEASE_DIR}"
+            mkdir -p "${BIN_DIR}"
 
-            tar -xzf /tmp/release.tgz -C "${RELEASE_DIR}"
+            # Stop existing service (PM2 or systemd)
+            pm2 delete wechat-dashboard >/dev/null 2>&1 || true
+            systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
 
-            cd "${RELEASE_DIR}"
-            npm ci --omit=dev
+            # Install new binary
+            cp /tmp/wechat-sync "${BINARY}"
+            chmod +x "${BINARY}"
 
-            # Copy .env from previous release or existing root
+            # Copy .env if exists
             SOURCE_ENV=""
-            if [ -f "${CURRENT_LINK}/.env" ]; then
-              SOURCE_ENV="${CURRENT_LINK}/.env"
+            if [ -f "${APP_ROOT}/current/.env" ]; then
+              SOURCE_ENV="${APP_ROOT}/current/.env"
             elif [ -f "${APP_ROOT}/.env" ]; then
               SOURCE_ENV="${APP_ROOT}/.env"
             fi
 
             if [ -n "${SOURCE_ENV}" ]; then
-              cp "${SOURCE_ENV}" "${RELEASE_DIR}/.env"
+              cp "${SOURCE_ENV}" "${BIN_DIR}/.env"
             elif [ -n "${APP_ENV_B64:-}" ]; then
-              printf '%s' "${APP_ENV_B64}" | tr -d '\r\n ' | base64 -d > "${RELEASE_DIR}/.env"
+              printf '%s' "${APP_ENV_B64}" | tr -d '\r\n ' | base64 -d > "${BIN_DIR}/.env"
             fi
 
-            ln -sfn "${RELEASE_DIR}" "${CURRENT_LINK}"
+            # Create systemd service
+            cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
+[Unit]
+Description=WeChat Article Sync Service
+After=network.target
 
-            if ! command -v pm2 >/dev/null 2>&1; then
-              npm install -g pm2
-            fi
+[Service]
+Type=simple
+ExecStart=${BINARY}
+WorkingDirectory=${BIN_DIR}
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=${SERVICE_NAME}
 
-            pm2 delete wechat-dashboard >/dev/null 2>&1 || true
-            pm2 start "${CURRENT_LINK}/server/dist/index.js" \
-              --name wechat-dashboard \
-              --cwd "${CURRENT_LINK}" \
-              --update-env
+[Install]
+WantedBy=multi-user.target
+EOF
 
-            pm2 save
-            pm2 startup systemd -u root --hp /root || true
+            systemctl daemon-reload
+            systemctl enable "${SERVICE_NAME}"
+            systemctl start "${SERVICE_NAME}"
 
             sleep 3
             curl -fsS "http://127.0.0.1:3002/health" >/dev/null
 
-            # Cleanup old releases, keep latest 5
-            ls -1dt "${RELEASES_DIR}"/* 2>/dev/null | tail -n +6 | xargs -r rm -rf
+            echo "Deploy complete: $(${BINARY} --version 2>/dev/null || echo 'binary installed')"
           REMOTE_SCRIPT
 
           REMOTE_ENV="$(printf \
-            "APP_DIR=%q APP_ENV_B64=%q GH_SHA=%q" \
-            "${APP_DIR:-}" "${APP_ENV_B64:-}" "${GH_SHA}")"
+            "APP_DIR=%q APP_ENV_B64=%q" \
+            "${APP_DIR:-}" "${APP_ENV_B64:-}")"
 
           ssh \
             -i ~/.ssh/id_aliyun \
@@ -209,4 +201,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: rm -f ~/.ssh/id_aliyun /tmp/remote_deploy.sh /tmp/release.tgz release.tgz
+        run: rm -f ~/.ssh/id_aliyun /tmp/remote_deploy.sh wechat-sync

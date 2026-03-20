@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1.0] - 2026-03-20
+
+### Fixed
+- Add HTTP status code checks on Feishu and WeChat API responses — non-2xx errors now return clear messages instead of misleading JSON parse errors
+
+### Changed
+- Parallelize 4 table syncs (articles, users, reads, shares) in RunFullSync for faster execution
+- Update TODOS.md with new improvement items from eng review
+
+### Added
+- Shell script for full historical data sync (scripts/full-sync.sh)
+
 ## [1.0.0.0] - 2026-03-18
 
 ### Changed

@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	stdsync "sync"
 	"time"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
@@ -457,6 +458,8 @@ type FullSyncResult struct {
 
 func RunFullSync(beginDate, endDate string) (*FullSyncResult, error) {
 	result := &FullSyncResult{}
+	var mu stdsync.Mutex
+	var quotaErr error
 
 	type task struct {
 		name string
@@ -470,37 +473,52 @@ func RunFullSync(beginDate, endDate string) (*FullSyncResult, error) {
 		{"shares", func() (interface{}, error) { return SyncShares(beginDate, endDate) }},
 	}
 
+	var wg stdsync.WaitGroup
 	for _, t := range tasks {
-		r, err := t.fn()
-		if err != nil {
-			if _, ok := err.(*wechat.QuotaLimitError); ok {
-				return nil, err
+		wg.Add(1)
+		go func(t task) {
+			defer wg.Done()
+			r, err := t.fn()
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				if _, ok := err.(*wechat.QuotaLimitError); ok {
+					quotaErr = err
+					return
+				}
+				log.Printf("[Scheduler] %s sync failed: %v", t.name, err)
+				errVal := map[string]string{"error": err.Error()}
+				switch t.name {
+				case "articles":
+					result.Articles = errVal
+				case "users":
+					result.Users = errVal
+				case "reads":
+					result.Reads = errVal
+				case "shares":
+					result.Shares = errVal
+				}
+				return
 			}
-			log.Printf("[Scheduler] %s sync failed: %v", t.name, err)
 			switch t.name {
 			case "articles":
-				result.Articles = map[string]string{"error": err.Error()}
+				result.Articles = r
 			case "users":
-				result.Users = map[string]string{"error": err.Error()}
+				result.Users = r
 			case "reads":
-				result.Reads = map[string]string{"error": err.Error()}
+				result.Reads = r
 			case "shares":
-				result.Shares = map[string]string{"error": err.Error()}
+				result.Shares = r
 			}
-			continue
-		}
-		switch t.name {
-		case "articles":
-			result.Articles = r
-		case "users":
-			result.Users = r
-		case "reads":
-			result.Reads = r
-		case "shares":
-			result.Shares = r
-		}
+		}(t)
 	}
+	wg.Wait()
 
+	if quotaErr != nil {
+		return nil, quotaErr
+	}
 	return result, nil
 }
 

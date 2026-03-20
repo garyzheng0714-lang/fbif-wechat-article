@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"sync"
@@ -94,6 +95,15 @@ func callWechatAPISingle(endpoint, token, beginDate, endDate string) (*apiRespon
 		return nil, fmt.Errorf("wechat api %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		snippet := string(respBody)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("wechat HTTP %d for %s: %s", resp.StatusCode, endpoint, snippet)
+	}
 
 	var result apiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

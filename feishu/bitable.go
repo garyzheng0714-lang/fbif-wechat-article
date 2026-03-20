@@ -81,6 +81,15 @@ func doFeishuRequest(method, fullURL string, body interface{}, token string) (js
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		snippet := string(body)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("feishu HTTP %d: %s", resp.StatusCode, snippet)
+	}
+
 	var result apiResp
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode feishu response: %w", err)

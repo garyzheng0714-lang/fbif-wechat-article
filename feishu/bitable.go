@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
@@ -414,6 +415,107 @@ func SyncRecordsUpsert(records []SyncRecord, keyField, tableID string) (*SyncRes
 	}
 
 	return &SyncResult{Created: created, Updated: updated}, nil
+}
+
+// ==================== Content Sync Helpers ====================
+
+// ArticleForContent holds the minimal data needed for a content sync pass.
+type ArticleForContent struct {
+	RecordID   string
+	UniqueKey  string
+	ArticleURL string
+}
+
+// GetArticlesNeedingContent returns records in tableID that have 文章链接 set
+// but 文章内容 empty. These are the candidates for content fetching.
+func GetArticlesNeedingContent(tableID string) ([]ArticleForContent, error) {
+	var result []ArticleForContent
+	pageToken := ""
+
+	for {
+		params := url.Values{
+			"page_size":   {"500"},
+			"field_names": {"唯一键,文章链接,文章内容"},
+		}
+		if pageToken != "" {
+			params.Set("page_token", pageToken)
+		}
+
+		data, err := feishuRequest("GET", "/records?"+params.Encode(), nil, tableID)
+		if err != nil {
+			return nil, err
+		}
+
+		var res struct {
+			Items []struct {
+				RecordID string                 `json:"record_id"`
+				Fields   map[string]interface{} `json:"fields"`
+			} `json:"items"`
+			HasMore   bool   `json:"has_more"`
+			PageToken string `json:"page_token"`
+		}
+		if err := json.Unmarshal(data, &res); err != nil {
+			return nil, fmt.Errorf("parse records: %w", err)
+		}
+
+		for _, item := range res.Items {
+			artURL := extractFieldString(item.Fields, "文章链接")
+			content := extractFieldString(item.Fields, "文章内容")
+			if artURL == "" || content != "" {
+				continue
+			}
+			uniqueKey := extractFieldString(item.Fields, "唯一键")
+			result = append(result, ArticleForContent{
+				RecordID:   item.RecordID,
+				UniqueKey:  uniqueKey,
+				ArticleURL: artURL,
+			})
+		}
+
+		if !res.HasMore {
+			break
+		}
+		pageToken = res.PageToken
+	}
+
+	return result, nil
+}
+
+// extractFieldString pulls a string value from a Feishu field.
+// Handles plain strings, URL objects {"link":"..."}, and text arrays.
+func extractFieldString(fields map[string]interface{}, name string) string {
+	v, ok := fields[name]
+	if !ok || v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case map[string]interface{}:
+		if link, ok := t["link"].(string); ok {
+			return link
+		}
+	case []interface{}:
+		// Feishu text fields return [{type:"text",text:"..."}]
+		var parts []string
+		for _, el := range t {
+			if m, ok := el.(map[string]interface{}); ok {
+				if s, ok := m["text"].(string); ok {
+					parts = append(parts, s)
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// UpdateRecordFields updates a single record's fields.
+func UpdateRecordFields(tableID, recordID string, fields map[string]interface{}) error {
+	_, err := feishuRequest("PUT", "/records/"+recordID, map[string]interface{}{
+		"fields": fields,
+	}, tableID)
+	return err
 }
 
 // ==================== Clear Records ====================

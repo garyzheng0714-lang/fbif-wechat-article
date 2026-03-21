@@ -136,6 +136,33 @@ func ResetHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// SyncContentHandler fetches plain-text content for articles that have a URL
+// but no 文章内容 yet. Runs asynchronously and returns immediately.
+//
+// POST /api/feishu/sync-content
+func SyncContentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+
+	log.Println("[Feishu Route] Starting article content sync in background...")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Content sync started. Check server logs for progress.",
+	})
+
+	go func() {
+		result, err := appSync.SyncArticleContent()
+		if err != nil {
+			log.Printf("[Feishu Route] Content sync failed: %v", err)
+			return
+		}
+		log.Printf("[Feishu Route] Content sync done: total=%d updated=%d failed=%d",
+			result.Total, result.Updated, result.Failed)
+	}()
+}
+
 // MigrateHandler switches to a new set of tables (via table suffix), resets the
 // cursor, and kicks off a full re-sync. Old tables are left completely untouched.
 //

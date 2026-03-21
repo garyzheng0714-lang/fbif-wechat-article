@@ -20,6 +20,7 @@ func main() {
 	mux.HandleFunc("/api/feishu/cursor", handler.CursorHandler)
 	mux.HandleFunc("/api/feishu/reset", handler.ResetHandler)
 	mux.HandleFunc("/api/feishu/migrate", handler.MigrateHandler)
+	mux.HandleFunc("/api/feishu/sync-content", handler.SyncContentHandler)
 
 	stopCh := make(chan struct{})
 	appSync.StartScheduler(stopCh)

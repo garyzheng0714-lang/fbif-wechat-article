@@ -30,6 +30,11 @@ func FetchArticleContent(articleURL string) (string, error) {
 	req.Header.Set("Accept", "text/markdown")
 	req.Header.Set("User-Agent", "fbif-wechat-sync/1.0")
 
+	// Add Jina API key if configured
+	if apiKey := os.Getenv("JINA_API_KEY"); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
 	resp, err := contentClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("jina fetch: %w", err)

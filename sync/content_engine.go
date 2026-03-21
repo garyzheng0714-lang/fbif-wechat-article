@@ -18,7 +18,7 @@ const (
 )
 
 // contentSyncMu prevents concurrent content sync runs (synchronisation guard).
-var contentSyncMu sync.Mutex
+var contentSyncMu stdsync.Mutex
 
 // articleContentFields defines the extra fields added to 文章主表 for content.
 // Note: content_status is a text field (not single-select) for maximum flexibility

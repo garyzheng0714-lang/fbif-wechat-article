@@ -518,6 +518,27 @@ func UpdateRecordFields(tableID, recordID string, fields map[string]interface{})
 	return err
 }
 
+// BatchUpdateByRecordID performs batch updates given a list of
+// {"record_id": "...", "fields": {...}} objects (Feishu batch_update format).
+// Processes in chunks of 500.
+func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) error {
+	for i := 0; i < len(records); i += 500 {
+		end := i + 500
+		if end > len(records) {
+			end = len(records)
+		}
+		batch := records[i:end]
+		_, err := feishuRequest("POST", "/records/batch_update", map[string]interface{}{
+			"records": batch,
+		}, tableID)
+		if err != nil {
+			return fmt.Errorf("batch update (offset %d): %w", i, err)
+		}
+		log.Printf("[Feishu] Batch updated %d records (%d/%d)", len(batch), i+len(batch), len(records))
+	}
+	return nil
+}
+
 // ==================== Clear Records ====================
 
 func ClearTableRecords(tableID string) (int, error) {

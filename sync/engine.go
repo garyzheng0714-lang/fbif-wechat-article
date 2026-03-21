@@ -338,9 +338,9 @@ func SyncArticles(beginDate, endDate string) (*ArticleSyncResult, error) {
 	if err := feishu.EnsureFieldsExist(articleMasterFields, tableID); err != nil {
 		return nil, fmt.Errorf("ensure master fields: %w", err)
 	}
-	// Use Upsert so that fields like 文章链接 get filled in on subsequent syncs
-	// if they were missing on the first insert.
-	masterResult, err := feishu.SyncRecordsUpsert(masterRecords, "唯一键", tableID)
+	// Use Upsert so that fields like 文章链接/唯一键 get filled in on subsequent
+	// syncs if they were missing on the first insert.
+	masterResult, err := feishu.SyncRecordsUpsert(masterRecords, "消息ID", tableID)
 	if err != nil {
 		return nil, fmt.Errorf("sync master: %w", err)
 	}

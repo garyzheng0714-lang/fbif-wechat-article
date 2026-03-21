@@ -138,6 +138,8 @@ jobs:
             # Stop existing service (PM2 or systemd)
             pm2 delete wechat-dashboard >/dev/null 2>&1 || true
             systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+            pkill -9 -f wechat-sync 2>/dev/null || true
+            sleep 2
 
             # Install new binary
             cp /tmp/wechat-sync "${BINARY}"

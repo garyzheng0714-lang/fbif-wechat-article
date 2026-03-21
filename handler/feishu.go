@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/feishu"
 	appSync "github.com/garyzheng0714-lang/fbif-wechat-article/sync"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
@@ -27,10 +26,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // HealthHandler returns service health status.
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	cursor, _ := appSync.ReadCursor()
+	cfg, _ := appSync.ReadConfig()
+	tableSuffix := ""
+	if cfg != nil {
+		tableSuffix = cfg.TableSuffix
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":      "ok",
 		"tokenStatus": wechat.GetTokenStatus(),
 		"cursor":      cursor,
+		"tableSuffix": tableSuffix,
 	})
 }
 
@@ -100,11 +105,11 @@ func ResetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tables := []tableSpec{
-		{"文章主表", func() (string, error) { return config.Env.FeishuBitableTableID, nil }},
-		{"每日文章数据", func() (string, error) { return feishu.GetOrCreateTable("每日文章数据") }},
-		{"粉丝增长", func() (string, error) { return feishu.GetOrCreateTable("粉丝增长") }},
-		{"每日阅读概况", func() (string, error) { return feishu.GetOrCreateTable("每日阅读概况") }},
-		{"分享场景", func() (string, error) { return feishu.GetOrCreateTable("分享场景") }},
+		{"文章主表", appSync.ArticleMasterTableID},
+		{"每日文章数据", func() (string, error) { return feishu.GetOrCreateTable(appSync.TableName("每日文章数据")) }},
+		{"粉丝增长", func() (string, error) { return feishu.GetOrCreateTable(appSync.TableName("粉丝增长")) }},
+		{"每日阅读概况", func() (string, error) { return feishu.GetOrCreateTable(appSync.TableName("每日阅读概况")) }},
+		{"分享场景", func() (string, error) { return feishu.GetOrCreateTable(appSync.TableName("分享场景")) }},
 	}
 
 	deleted := make(map[string]int)
@@ -128,5 +133,52 @@ func ResetHandler(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "All data cleared and cursor reset",
 		"deleted": deleted,
+	})
+}
+
+// MigrateHandler switches to a new set of tables (via table suffix), resets the
+// cursor, and kicks off a full re-sync. Old tables are left completely untouched.
+//
+// POST /api/feishu/migrate
+// Body: {"table_suffix": "_v2"}
+func MigrateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+
+	var body struct {
+		TableSuffix string `json:"table_suffix"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if body.TableSuffix == "" {
+		writeError(w, http.StatusBadRequest, "table_suffix is required")
+		return
+	}
+
+	if err := appSync.WriteConfig(&appSync.SyncConfig{TableSuffix: body.TableSuffix}); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	appSync.DeleteCursor()
+
+	log.Printf("[Feishu Route] Migration to tableSuffix=%q: cursor reset, starting full re-sync", body.TableSuffix)
+
+	go func() {
+		if err := appSync.RunDailySync(); err != nil {
+			log.Printf("[Feishu Route] Migration daily sync failed: %v", err)
+		}
+		if err := appSync.RunBackfillSync(); err != nil {
+			log.Printf("[Feishu Route] Migration backfill failed: %v", err)
+		}
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":     true,
+		"tableSuffix": body.TableSuffix,
+		"message":     "Config saved, cursor reset, full re-sync started in background. Old tables are untouched.",
 	})
 }

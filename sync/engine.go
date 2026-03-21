@@ -244,6 +244,16 @@ func toUserShareFields(item wechat.UserShareItem) map[string]interface{} {
 	}
 }
 
+// ArticleMasterTableID returns the table ID for the article master table.
+// When a table suffix is configured, it uses GetOrCreateTable to create/find
+// a new table with that suffix. Otherwise falls back to the env var.
+func ArticleMasterTableID() (string, error) {
+	if suffix := GetTableSuffix(); suffix != "" {
+		return feishu.GetOrCreateTable(TableName("文章主表"))
+	}
+	return config.Env.FeishuBitableTableID, nil
+}
+
 // ==================== Sync Functions ====================
 
 type ArticleSyncResult struct {
@@ -293,7 +303,10 @@ func SyncArticles(beginDate, endDate string) (*ArticleSyncResult, error) {
 		})
 	}
 
-	tableID := config.Env.FeishuBitableTableID
+	tableID, err := ArticleMasterTableID()
+	if err != nil {
+		return nil, fmt.Errorf("get master table: %w", err)
+	}
 	if err := feishu.EnsureFieldsExist(articleMasterFields, tableID); err != nil {
 		return nil, fmt.Errorf("ensure master fields: %w", err)
 	}
@@ -302,7 +315,7 @@ func SyncArticles(beginDate, endDate string) (*ArticleSyncResult, error) {
 		return nil, fmt.Errorf("sync master: %w", err)
 	}
 
-	dailyTableID, err := feishu.GetOrCreateTable("每日文章数据")
+	dailyTableID, err := feishu.GetOrCreateTable(TableName("每日文章数据"))
 	if err != nil {
 		return nil, fmt.Errorf("get daily table: %w", err)
 	}
@@ -362,7 +375,7 @@ func SyncUsers(beginDate, endDate string) (*UpsertSyncResult, error) {
 		})
 	}
 
-	tableID, err := feishu.GetOrCreateTable("粉丝增长")
+	tableID, err := feishu.GetOrCreateTable(TableName("粉丝增长"))
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +410,7 @@ func SyncReads(beginDate, endDate string) (*UpsertSyncResult, error) {
 		})
 	}
 
-	tableID, err := feishu.GetOrCreateTable("每日阅读概况")
+	tableID, err := feishu.GetOrCreateTable(TableName("每日阅读概况"))
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +445,7 @@ func SyncShares(beginDate, endDate string) (*UpsertSyncResult, error) {
 		})
 	}
 
-	tableID, err := feishu.GetOrCreateTable("分享场景")
+	tableID, err := feishu.GetOrCreateTable(TableName("分享场景"))
 	if err != nil {
 		return nil, err
 	}

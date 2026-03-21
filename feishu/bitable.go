@@ -429,14 +429,24 @@ type ArticleForContent struct {
 // GetArticlesNeedingContent returns records in tableID that have 文章链接 set
 // but 文章内容 empty. Also recovers articles stuck in "pending" state from a
 // crashed previous run — these have content_status="pending" but content still empty.
+//
+// It first tries to fetch specific fields (efficient), but falls back to
+// fetching all fields if the Bitable API returns InvalidFieldNames (e.g. after
+// EnsureFieldsExist just created new fields that aren't yet visible in queries).
 func GetArticlesNeedingContent(tableID string) ([]ArticleForContent, error) {
 	var result []ArticleForContent
 	pageToken := ""
+	tryWithFields := true
 
 	for {
 		params := url.Values{
-			"page_size":   {"500"},
-			"field_names": {"唯一键,文章链接,文章内容,content_status"},
+			"page_size": {"500"},
+		}
+		// Try with specific field_names first (more efficient).
+		// If Feishu returns InvalidFieldNames (field was just created), fall back
+		// to fetching all fields and filtering in Go.
+		if tryWithFields {
+			params.Set("field_names", "唯一键,文章链接,文章内容,content_status")
 		}
 		if pageToken != "" {
 			params.Set("page_token", pageToken)
@@ -444,6 +454,12 @@ func GetArticlesNeedingContent(tableID string) ([]ArticleForContent, error) {
 
 		data, err := feishuRequest("GET", "/records?"+params.Encode(), nil, tableID)
 		if err != nil {
+			// If we got InvalidFieldNames, retry without field_names (fallback)
+			if tryWithFields && isInvalidFieldNamesError(err) {
+				log.Printf("[Feishu] GetArticlesNeedingContent: field_names not yet valid, falling back to all fields")
+				tryWithFields = false
+				continue
+			}
 			return nil, err
 		}
 
@@ -489,6 +505,11 @@ func GetArticlesNeedingContent(tableID string) ([]ArticleForContent, error) {
 	}
 
 	return result, nil
+}
+
+// isInvalidFieldNamesError returns true if the Feishu API error is InvalidFieldNames.
+func isInvalidFieldNamesError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InvalidFieldNames")
 }
 
 // extractFieldString pulls a string value from a Feishu field.

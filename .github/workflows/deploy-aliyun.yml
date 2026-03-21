@@ -158,24 +158,24 @@ jobs:
             fi
 
             # Create systemd service
-            cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
-[Unit]
-Description=WeChat Article Sync Service
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${BINARY}
-WorkingDirectory=${BIN_DIR}
-Restart=on-failure
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=${SERVICE_NAME}
-
-[Install]
-WantedBy=multi-user.target
-EOF
+            printf '%s\n' \
+              '[Unit]' \
+              'Description=WeChat Article Sync Service' \
+              'After=network.target' \
+              '' \
+              '[Service]' \
+              'Type=simple' \
+              "ExecStart=${BINARY}" \
+              "WorkingDirectory=${BIN_DIR}" \
+              'Restart=on-failure' \
+              'RestartSec=10' \
+              'StandardOutput=journal' \
+              'StandardError=journal' \
+              "SyslogIdentifier=${SERVICE_NAME}" \
+              '' \
+              '[Install]' \
+              'WantedBy=multi-user.target' \
+              > /etc/systemd/system/${SERVICE_NAME}.service
 
             systemctl daemon-reload
             systemctl enable "${SERVICE_NAME}"

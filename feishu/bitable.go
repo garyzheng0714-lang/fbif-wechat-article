@@ -427,7 +427,8 @@ type ArticleForContent struct {
 }
 
 // GetArticlesNeedingContent returns records in tableID that have 文章链接 set
-// but 文章内容 empty. These are the candidates for content fetching.
+// but 文章内容 empty. Also recovers articles stuck in "pending" state from a
+// crashed previous run — these have content_status="pending" but content still empty.
 func GetArticlesNeedingContent(tableID string) ([]ArticleForContent, error) {
 	var result []ArticleForContent
 	pageToken := ""
@@ -435,7 +436,7 @@ func GetArticlesNeedingContent(tableID string) ([]ArticleForContent, error) {
 	for {
 		params := url.Values{
 			"page_size":   {"500"},
-			"field_names": {"唯一键,文章链接,文章内容"},
+			"field_names": {"唯一键,文章链接,文章内容,content_status"},
 		}
 		if pageToken != "" {
 			params.Set("page_token", pageToken)
@@ -461,7 +462,16 @@ func GetArticlesNeedingContent(tableID string) ([]ArticleForContent, error) {
 		for _, item := range res.Items {
 			artURL := extractFieldString(item.Fields, "文章链接")
 			content := extractFieldString(item.Fields, "文章内容")
+			contentStatus := extractFieldString(item.Fields, "content_status")
+
+			// Skip: no URL, or already has content (done)
 			if artURL == "" || content != "" {
+				continue
+			}
+			// Include: no content AND (no status set OR status is "pending" — crash recovery)
+			// Articles with status "failed" are also included (retry logic — they'll be re-fetched)
+			if contentStatus != "" && contentStatus != "pending" {
+				// Status is "done" (content empty but done? shouldn't happen) or "permanent_fail"
 				continue
 			}
 			uniqueKey := extractFieldString(item.Fields, "唯一键")

@@ -15,12 +15,13 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.HealthHandler)
-	mux.HandleFunc("/api/feishu/sync", handler.SyncHandler)
-	mux.HandleFunc("/api/feishu/backfill", handler.BackfillHandler)
-	mux.HandleFunc("/api/feishu/cursor", handler.CursorHandler)
-	mux.HandleFunc("/api/feishu/reset", handler.ResetHandler)
-	mux.HandleFunc("/api/feishu/migrate", handler.MigrateHandler)
-	mux.HandleFunc("/api/feishu/sync-content", handler.SyncContentHandler)
+	// All other endpoints require API key authentication
+	mux.HandleFunc("/api/feishu/sync", handler.RequireAPIKey(handler.SyncHandler))
+	mux.HandleFunc("/api/feishu/backfill", handler.RequireAPIKey(handler.BackfillHandler))
+	mux.HandleFunc("/api/feishu/cursor", handler.RequireAPIKey(handler.CursorHandler))
+	mux.HandleFunc("/api/feishu/reset", handler.RequireAPIKey(handler.ResetHandler))
+	mux.HandleFunc("/api/feishu/migrate", handler.RequireAPIKey(handler.MigrateHandler))
+	mux.HandleFunc("/api/feishu/sync-content", handler.RequireAPIKey(handler.SyncContentHandler))
 
 	stopCh := make(chan struct{})
 	appSync.StartScheduler(stopCh)

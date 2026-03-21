@@ -17,6 +17,7 @@ type Config struct {
 	FeishuAppSecret       string
 	FeishuBitableAppToken string
 	FeishuBitableTableID  string
+	APIKey                string // Bearer token for HTTP endpoints
 }
 
 var Env Config
@@ -33,6 +34,7 @@ func Init() {
 		FeishuAppSecret:       os.Getenv("FEISHU_APP_SECRET"),
 		FeishuBitableAppToken: os.Getenv("FEISHU_BITABLE_APP_TOKEN"),
 		FeishuBitableTableID:  os.Getenv("FEISHU_BITABLE_TABLE_ID"),
+		APIKey:                os.Getenv("API_KEY"),
 	}
 
 	if Env.WechatAppID == "" || Env.WechatSecret == "" {

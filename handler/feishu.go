@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
+	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/feishu"
 	appSync "github.com/garyzheng0714-lang/fbif-wechat-article/sync"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
@@ -21,6 +23,32 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 		"success": false,
 		"error":   msg,
 	})
+}
+
+// RequireAPIKey returns a handler that checks the Authorization header.
+// Supports: "Bearer <token>" and "X-API-Key: <token>".
+// Skips auth if config.APIKey is empty (development mode).
+func RequireAPIKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if config.Env.APIKey == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		token := ""
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			if strings.HasPrefix(auth, "Bearer ") {
+				token = strings.TrimPrefix(auth, "Bearer ")
+			}
+		}
+		if token == "" {
+			token = r.Header.Get("X-API-Key")
+		}
+		if token != config.Env.APIKey {
+			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
 }
 
 // HealthHandler returns service health status.

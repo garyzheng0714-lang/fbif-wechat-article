@@ -11,7 +11,8 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
-// RunDailySync syncs data from cursor.newestSyncedDate+1 to yesterday.
+// RunDailySync syncs data from cursor.newestSyncedDate+1 to yesterday,
+// then triggers article content fetching.
 func RunDailySync() error {
 	cfg := config.Env
 	if cfg.WechatAppID == "" || cfg.WechatSecret == "" {
@@ -62,15 +63,30 @@ func RunDailySync() error {
 		backfillComplete = cursor.BackfillComplete
 	}
 
-	return WriteCursor(&SyncCursor{
+	if err := WriteCursor(&SyncCursor{
 		OldestSyncedDate: oldestDate,
 		NewestSyncedDate: yesterday,
 		BackfillComplete: backfillComplete,
-	})
+	}); err != nil {
+		return err
+	}
+
+	// ── Content fetch (new articles just synced) ────────────────────────────
+	log.Println("[Scheduler] Triggering article content fetch for newly synced articles...")
+	contentResult, err := SyncArticleContent()
+	if err != nil {
+		log.Printf("[Scheduler] Content fetch failed: %v", err)
+	} else {
+		log.Printf("[Scheduler] Content fetch done: total=%d updated=%d failed=%d",
+			contentResult.Total, contentResult.Updated, contentResult.Failed)
+	}
+
+	return nil
 }
 
 // RunBackfillSync continues from cursor.oldestSyncedDate backwards.
 // Each chunk is 7 days. Stops when API returns empty data.
+// After each chunk completes, triggers article content fetching for that chunk's articles.
 func RunBackfillSync() error {
 	cfg := config.Env
 	if cfg.WechatAppID == "" || cfg.WechatSecret == "" {
@@ -155,6 +171,16 @@ func RunBackfillSync() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// ── Content fetch (historical articles backfill) ────────────────────────
+	log.Println("[Scheduler] Triggering article content fetch for historical articles...")
+	contentResult, err := SyncArticleContent()
+	if err != nil {
+		log.Printf("[Scheduler] Content fetch failed: %v", err)
+	} else {
+		log.Printf("[Scheduler] Content fetch done: total=%d updated=%d failed=%d",
+			contentResult.Total, contentResult.Updated, contentResult.Failed)
 	}
 
 	log.Println("[Scheduler] Backfill finished")

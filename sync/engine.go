@@ -49,6 +49,8 @@ var dailyArticleDataFields = []feishu.FieldSpec{
 	{Name: "好友转发阅读次数", Type: feishu.FieldTypeNumber},
 	{Name: "其他来源阅读人数", Type: feishu.FieldTypeNumber},
 	{Name: "其他来源阅读次数", Type: feishu.FieldTypeNumber},
+	{Name: "看一看阅读人数", Type: feishu.FieldTypeNumber},
+	{Name: "搜一搜阅读人数", Type: feishu.FieldTypeNumber},
 	{Name: "会话转发分享人数", Type: feishu.FieldTypeNumber},
 	{Name: "会话转发分享次数", Type: feishu.FieldTypeNumber},
 	{Name: "朋友圈转发分享人数", Type: feishu.FieldTypeNumber},
@@ -128,6 +130,16 @@ func nowMs() int64 {
 	return time.Now().UnixMilli()
 }
 
+func articleURL(t *wechat.ArticleTotalItem) string {
+	if t == nil {
+		return ""
+	}
+	if t.URL != "" {
+		return t.URL
+	}
+	return t.ContentURL
+}
+
 func toArticleMasterFields(item wechat.ArticleSummaryItem, totalItem *wechat.ArticleTotalItem) map[string]interface{} {
 	fields := map[string]interface{}{
 		"文章标题": item.Title,
@@ -140,8 +152,8 @@ func toArticleMasterFields(item wechat.ArticleSummaryItem, totalItem *wechat.Art
 	if idx := extractArticleIndex(item.MsgID); idx != nil {
 		fields["文章位置"] = *idx
 	}
-	if totalItem != nil && totalItem.URL != "" {
-		fields["文章链接"] = map[string]string{"link": totalItem.URL, "text": totalItem.URL}
+	if u := articleURL(totalItem); u != "" {
+		fields["文章链接"] = map[string]string{"link": u, "text": u}
 	}
 
 	return fields
@@ -178,6 +190,8 @@ func toDailyArticleDataFields(item wechat.ArticleSummaryItem, totalItem *wechat.
 		fields["好友转发阅读次数"] = d.IntPageFromFriendsReadCount
 		fields["其他来源阅读人数"] = d.IntPageFromOtherReadUser
 		fields["其他来源阅读次数"] = d.IntPageFromOtherReadCount
+		fields["看一看阅读人数"] = d.IntPageFromKanyikanReadUser
+		fields["搜一搜阅读人数"] = d.IntPageFromSouyisouReadUser
 		fields["会话转发分享人数"] = d.FeedShareFromSessionUser
 		fields["会话转发分享次数"] = d.FeedShareFromSessionCnt
 		fields["朋友圈转发分享人数"] = d.FeedShareFromFeedUser
@@ -281,9 +295,20 @@ func SyncArticles(beginDate, endDate string) (*ArticleSyncResult, error) {
 		return nil, fmt.Errorf("parse total: %w", err)
 	}
 
+	// Build totalMap keyed by MsgID. When the API returns multiple records per
+	// article (e.g. one per user_source), prefer the entry that has a URL.
 	totalMap := make(map[string]*wechat.ArticleTotalItem)
 	for i := range totalItems {
-		totalMap[totalItems[i].MsgID] = &totalItems[i]
+		candidate := &totalItems[i]
+		existing, ok := totalMap[candidate.MsgID]
+		if !ok {
+			totalMap[candidate.MsgID] = candidate
+			continue
+		}
+		// Keep whichever entry has a URL (url or content_url)
+		if articleURL(existing) == "" && articleURL(candidate) != "" {
+			totalMap[candidate.MsgID] = candidate
+		}
 	}
 
 	var masterRecords []feishu.SyncRecord
@@ -310,7 +335,9 @@ func SyncArticles(beginDate, endDate string) (*ArticleSyncResult, error) {
 	if err := feishu.EnsureFieldsExist(articleMasterFields, tableID); err != nil {
 		return nil, fmt.Errorf("ensure master fields: %w", err)
 	}
-	masterResult, err := feishu.SyncRecordsInsertOnly(masterRecords, "消息ID", tableID)
+	// Use Upsert so that fields like 文章链接 get filled in on subsequent syncs
+	// if they were missing on the first insert.
+	masterResult, err := feishu.SyncRecordsUpsert(masterRecords, "消息ID", tableID)
 	if err != nil {
 		return nil, fmt.Errorf("sync master: %w", err)
 	}

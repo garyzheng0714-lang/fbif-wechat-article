@@ -43,8 +43,10 @@ type ArticleTotalDetail struct {
 	FeedShareFromSessionCnt      int    `json:"feed_share_from_session_cnt"`
 	FeedShareFromFeedUser        int    `json:"feed_share_from_feed_user"`
 	FeedShareFromFeedCnt         int    `json:"feed_share_from_feed_cnt"`
-	FeedShareFromOtherUser       int    `json:"feed_share_from_other_user"`
-	FeedShareFromOtherCnt        int    `json:"feed_share_from_other_cnt"`
+	FeedShareFromOtherUser           int `json:"feed_share_from_other_user"`
+	FeedShareFromOtherCnt            int `json:"feed_share_from_other_cnt"`
+	IntPageFromKanyikanReadUser      int `json:"int_page_from_kanyikan_read_user"`
+	IntPageFromSouyisouReadUser      int `json:"int_page_from_souyisou_read_user"`
 }
 
 type ArticleTotalItem struct {
@@ -53,6 +55,7 @@ type ArticleTotalItem struct {
 	Title      string               `json:"title"`
 	UserSource int                  `json:"user_source"`
 	URL        string               `json:"url"`
+	ContentURL string               `json:"content_url"` // some account types use this field name
 	Details    []ArticleTotalDetail `json:"details"`
 }
 

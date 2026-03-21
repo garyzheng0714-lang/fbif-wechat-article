@@ -127,7 +127,11 @@ var (
 	tableIDCacheMu sync.Mutex
 )
 
-func GetOrCreateTable(tableName string) (string, error) {
+// GetOrCreateTable looks up or creates a Feishu Bitable table by name.
+// An optional primaryFieldName can be provided; when the table is newly created
+// that field becomes the first (primary/index) column. If omitted Feishu creates
+// an unnamed default primary column.
+func GetOrCreateTable(tableName string, primaryFieldName ...string) (string, error) {
 	tableIDCacheMu.Lock()
 	if id, ok := tableIDCache[tableName]; ok {
 		tableIDCacheMu.Unlock()
@@ -162,8 +166,14 @@ func GetOrCreateTable(tableName string) (string, error) {
 	tableIDCacheMu.Unlock()
 
 	log.Printf("[Feishu] Creating new table: %s", tableName)
+	tablePayload := map[string]interface{}{"name": tableName}
+	if len(primaryFieldName) > 0 && primaryFieldName[0] != "" {
+		tablePayload["fields"] = []map[string]interface{}{
+			{"field_name": primaryFieldName[0], "type": FieldTypeText},
+		}
+	}
 	createData, err := feishuAppRequest("POST", "/tables", map[string]interface{}{
-		"table": map[string]string{"name": tableName},
+		"table": tablePayload,
 	})
 	if err != nil {
 		return "", err

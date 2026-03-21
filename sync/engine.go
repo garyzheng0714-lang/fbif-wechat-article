@@ -18,6 +18,7 @@ import (
 
 var articleMasterFields = []feishu.FieldSpec{
 	{Name: "文章标题", Type: feishu.FieldTypeText},
+	{Name: "唯一键", Type: feishu.FieldTypeText},
 	{Name: "发布日期", Type: feishu.FieldTypeDatetime},
 	{Name: "发布月份", Type: feishu.FieldTypeText},
 	{Name: "消息ID", Type: feishu.FieldTypeText},
@@ -143,6 +144,7 @@ func articleURL(t *wechat.ArticleTotalItem) string {
 func toArticleMasterFields(item wechat.ArticleSummaryItem, totalItem *wechat.ArticleTotalItem) map[string]interface{} {
 	fields := map[string]interface{}{
 		"文章标题": item.Title,
+		"唯一键":  item.MsgID,
 		"发布日期": toDateMs(item.RefDate),
 		"发布月份": toPublishMonth(item.RefDate),
 		"消息ID": item.MsgID,
@@ -260,10 +262,11 @@ func toUserShareFields(item wechat.UserShareItem) map[string]interface{} {
 
 // ArticleMasterTableID returns the table ID for the article master table.
 // When a table suffix is configured, it uses GetOrCreateTable to create/find
-// a new table with that suffix. Otherwise falls back to the env var.
+// a new table with that suffix (with 文章标题 as the primary/first column).
+// Otherwise falls back to the env var.
 func ArticleMasterTableID() (string, error) {
 	if suffix := GetTableSuffix(); suffix != "" {
-		return feishu.GetOrCreateTable(TableName("文章主表"))
+		return feishu.GetOrCreateTable(TableName("文章主表"), "文章标题")
 	}
 	return config.Env.FeishuBitableTableID, nil
 }
@@ -337,7 +340,7 @@ func SyncArticles(beginDate, endDate string) (*ArticleSyncResult, error) {
 	}
 	// Use Upsert so that fields like 文章链接 get filled in on subsequent syncs
 	// if they were missing on the first insert.
-	masterResult, err := feishu.SyncRecordsUpsert(masterRecords, "消息ID", tableID)
+	masterResult, err := feishu.SyncRecordsUpsert(masterRecords, "唯一键", tableID)
 	if err != nil {
 		return nil, fmt.Errorf("sync master: %w", err)
 	}

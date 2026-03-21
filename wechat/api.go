@@ -83,6 +83,10 @@ type apiResponse struct {
 }
 
 func callWechatAPISingle(endpoint, token, beginDate, endDate string) (*apiResponse, error) {
+	if err := checkAndIncrementQuota(endpoint); err != nil {
+		return nil, err
+	}
+
 	url := fmt.Sprintf("%s/%s?access_token=%s", wechatAPIBase, endpoint, token)
 
 	body, _ := json.Marshal(map[string]string{

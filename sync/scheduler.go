@@ -3,6 +3,8 @@ package sync
 import (
 	"encoding/json"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
@@ -106,7 +108,15 @@ func RunBackfillSync() error {
 
 	chunkSize := 7
 
-	for i := 0; i < 200; i++ {
+	maxChunks := 20
+	if v := os.Getenv("BACKFILL_CHUNKS_PER_RUN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxChunks = n
+		}
+	}
+	log.Printf("[Scheduler] Backfill: max %d chunks per run (%d days each)", maxChunks, chunkSize)
+
+	for i := 0; i < maxChunks; i++ {
 		chunkBegin, err := wechat.AddDays(currentEnd, -(chunkSize - 1))
 		if err != nil {
 			return err

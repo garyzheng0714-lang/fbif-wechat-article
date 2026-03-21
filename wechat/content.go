@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-var contentClient = &http.Client{Timeout: 30 * time.Second}
+var contentClient = &http.Client{Timeout: 60 * time.Second}
 
 // FetchArticleContent fetches a WeChat article's full text via Jina Reader.
 // WeChat CDN images are replaced with publicly accessible URLs:

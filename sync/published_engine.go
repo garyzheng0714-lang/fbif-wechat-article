@@ -135,6 +135,8 @@ func SyncPublishedArticles() (*PublishedSyncResult, error) {
 		}
 	}
 
+	records = dedupeSyncRecords(records)
+
 	upsertResult, err := feishu.SyncRecordsUpsert(records, "唯一键", tableID)
 	if err != nil {
 		return nil, fmt.Errorf("upsert published articles: %w", err)

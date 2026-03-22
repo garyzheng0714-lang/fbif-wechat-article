@@ -41,6 +41,7 @@ func main() {
 	stopCh := make(chan struct{})
 	appSync.StartScheduler(stopCh)
 	appSync.StartMediaWorker(stopCh)
+	appSync.StartHistoryWorker(stopCh)
 
 	go func() {
 		log.Println("[Startup] Running initial sync...")

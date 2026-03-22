@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -300,6 +301,44 @@ type Record struct {
 	Fields   map[string]interface{}
 }
 
+func recordWriteBatchSize() int {
+	raw := strings.TrimSpace(os.Getenv("FEISHU_RECORD_BATCH_SIZE"))
+	if raw == "" {
+		return 20
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 20
+	}
+	if n > 500 {
+		return 500
+	}
+	return n
+}
+
+func BatchCreateByRecordFields(tableID string, records []map[string]interface{}) error {
+	batchSize := recordWriteBatchSize()
+	created := 0
+	for i := 0; i < len(records); i += batchSize {
+		end := i + batchSize
+		if end > len(records) {
+			end = len(records)
+		}
+		batch := records[i:end]
+		recordWriteMu.Lock()
+		_, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
+			"records": batch,
+		}, tableID)
+		recordWriteMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("batch create (offset %d): %w", i, err)
+		}
+		created += len(batch)
+		log.Printf("[Feishu] Batch created %d records (%d/%d)", len(batch), created, len(records))
+	}
+	return nil
+}
+
 func ListRecords(tableID string, fieldNames []string) ([]Record, error) {
 	var records []Record
 	pageToken := ""
@@ -355,8 +394,10 @@ func ListRecords(tableID string, fieldNames []string) ([]Record, error) {
 }
 
 func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) error {
-	for i := 0; i < len(records); i += 500 {
-		end := i + 500
+	batchSize := recordWriteBatchSize()
+	updated := 0
+	for i := 0; i < len(records); i += batchSize {
+		end := i + batchSize
 		if end > len(records) {
 			end = len(records)
 		}
@@ -369,7 +410,8 @@ func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) err
 		if err != nil {
 			return fmt.Errorf("batch update (offset %d): %w", i, err)
 		}
-		log.Printf("[Feishu] Batch updated %d records (%d/%d)", len(batch), i+len(batch), len(records))
+		updated += len(batch)
+		log.Printf("[Feishu] Batch updated %d records (%d/%d)", len(batch), updated, len(records))
 	}
 	return nil
 }
@@ -444,22 +486,11 @@ func SyncRecordsInsertOnly(records []SyncRecord, keyField, tableID string) (*Syn
 	}
 
 	created := 0
-	for i := 0; i < len(createList); i += 500 {
-		end := i + 500
-		if end > len(createList) {
-			end = len(createList)
-		}
-		batch := createList[i:end]
-		recordWriteMu.Lock()
-		_, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
-			"records": batch,
-		}, tableID)
-		recordWriteMu.Unlock()
-		if err != nil {
+	if len(createList) > 0 {
+		if err := BatchCreateByRecordFields(tableID, createList); err != nil {
 			return nil, fmt.Errorf("batch create: %w", err)
 		}
-		created += len(batch)
-		log.Printf("[Feishu] Batch created %d records (%d/%d)", len(batch), created, len(createList))
+		created = len(createList)
 	}
 
 	return &SyncResult{Created: created, Skipped: skipped}, nil
@@ -490,41 +521,19 @@ func SyncRecordsUpsert(records []SyncRecord, keyField, tableID string) (*SyncRes
 	}
 
 	created := 0
-	for i := 0; i < len(createList); i += 500 {
-		end := i + 500
-		if end > len(createList) {
-			end = len(createList)
-		}
-		batch := createList[i:end]
-		recordWriteMu.Lock()
-		_, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
-			"records": batch,
-		}, tableID)
-		recordWriteMu.Unlock()
-		if err != nil {
+	if len(createList) > 0 {
+		if err := BatchCreateByRecordFields(tableID, createList); err != nil {
 			return nil, fmt.Errorf("batch create: %w", err)
 		}
-		created += len(batch)
-		log.Printf("[Feishu] Batch created %d records (%d/%d)", len(batch), created, len(createList))
+		created = len(createList)
 	}
 
 	updated := 0
-	for i := 0; i < len(updateList); i += 500 {
-		end := i + 500
-		if end > len(updateList) {
-			end = len(updateList)
-		}
-		batch := updateList[i:end]
-		recordWriteMu.Lock()
-		_, err := feishuRequest("POST", "/records/batch_update", map[string]interface{}{
-			"records": batch,
-		}, tableID)
-		recordWriteMu.Unlock()
-		if err != nil {
+	if len(updateList) > 0 {
+		if err := BatchUpdateByRecordID(tableID, updateList); err != nil {
 			return nil, fmt.Errorf("batch update: %w", err)
 		}
-		updated += len(batch)
-		log.Printf("[Feishu] Batch updated %d records (%d/%d)", len(batch), updated, len(updateList))
+		updated = len(updateList)
 	}
 
 	return &SyncResult{Created: created, Updated: updated}, nil

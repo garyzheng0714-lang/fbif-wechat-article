@@ -14,6 +14,8 @@ type SyncCursor struct {
 	BackfillComplete          bool   `json:"backfillComplete"`
 	PublishedScannedPages     int    `json:"publishedScannedPages,omitempty"`
 	PublishedBackfillComplete bool   `json:"publishedBackfillComplete,omitempty"`
+	MaterialNewsOffset        int    `json:"materialNewsOffset,omitempty"`
+	MaterialBackfillComplete  bool   `json:"materialBackfillComplete,omitempty"`
 }
 
 func getCursorPaths() []string {
@@ -48,8 +50,16 @@ func WriteCursor(cursor *SyncCursor) error {
 	if err := os.WriteFile(paths[0], data, 0644); err != nil {
 		return fmt.Errorf("write cursor: %w", err)
 	}
-	log.Printf("[Cursor] Saved: oldest=%s, newest=%s, complete=%v",
-		cursor.OldestSyncedDate, cursor.NewestSyncedDate, cursor.BackfillComplete)
+	log.Printf(
+		"[Cursor] Saved: oldest=%s newest=%s complete=%v published_pages=%d published_done=%v material_offset=%d material_done=%v",
+		cursor.OldestSyncedDate,
+		cursor.NewestSyncedDate,
+		cursor.BackfillComplete,
+		cursor.PublishedScannedPages,
+		cursor.PublishedBackfillComplete,
+		cursor.MaterialNewsOffset,
+		cursor.MaterialBackfillComplete,
+	)
 	return nil
 }
 

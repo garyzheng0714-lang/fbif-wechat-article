@@ -91,6 +91,48 @@ type PublishedArticleBatch struct {
 	Item       []PublishedArticleItem `json:"item"`
 }
 
+// --- material/batchget_material response ---
+
+type MaterialNewsArticle struct {
+	Title              string `json:"title"`
+	Author             string `json:"author"`
+	Digest             string `json:"digest"`
+	Content            string `json:"content"`
+	ContentSourceURL   string `json:"content_source_url"`
+	ThumbMediaID       string `json:"thumb_media_id"`
+	ShowCoverPic       int    `json:"show_cover_pic"`
+	URL                string `json:"url"`
+	ThumbURL           string `json:"thumb_url"`
+	NeedOpenComment    int    `json:"need_open_comment"`
+	OnlyFansCanComment int    `json:"only_fans_can_comment"`
+	ArticleType        string `json:"article_type"`
+}
+
+type MaterialNewsContent struct {
+	NewsItem []MaterialNewsArticle `json:"news_item"`
+}
+
+type MaterialNewsItem struct {
+	MediaID    string              `json:"media_id"`
+	Content    MaterialNewsContent `json:"content"`
+	UpdateTime int64               `json:"update_time"`
+}
+
+type MaterialNewsBatch struct {
+	ErrCode    int                `json:"errcode"`
+	ErrMsg     string             `json:"errmsg"`
+	TotalCount int                `json:"total_count"`
+	ItemCount  int                `json:"item_count"`
+	Item       []MaterialNewsItem `json:"item"`
+}
+
+type MaterialCount struct {
+	VoiceCount int `json:"voice_count"`
+	VideoCount int `json:"video_count"`
+	ImageCount int `json:"image_count"`
+	NewsCount  int `json:"news_count"`
+}
+
 // --- getusersummary response ---
 
 type UserSummaryItem struct {

@@ -34,3 +34,20 @@ func AddDays(dateStr string, days int) (string, error) {
 	}
 	return FormatDate(t.AddDate(0, 0, days)), nil
 }
+
+func GetDateRange(beginDate, endDate string) ([]string, error) {
+	start, err := ParseDate(beginDate)
+	if err != nil {
+		return nil, err
+	}
+	end, err := ParseDate(endDate)
+	if err != nil {
+		return nil, err
+	}
+
+	var dates []string
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		dates = append(dates, FormatDate(d))
+	}
+	return dates, nil
+}

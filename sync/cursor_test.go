@@ -23,9 +23,11 @@ func TestCursorReadWriteDelete(t *testing.T) {
 
 	// Write and read back
 	expected := &SyncCursor{
-		OldestSyncedDate: "2026-01-01",
-		NewestSyncedDate: "2026-03-17",
-		BackfillComplete: false,
+		OldestSyncedDate:          "2026-01-01",
+		NewestSyncedDate:          "2026-03-17",
+		BackfillComplete:          false,
+		PublishedScannedPages:     8,
+		PublishedBackfillComplete: true,
 	}
 	if err := WriteCursor(expected); err != nil {
 		t.Fatalf("WriteCursor: %v", err)
@@ -46,6 +48,12 @@ func TestCursorReadWriteDelete(t *testing.T) {
 	}
 	if cursor.BackfillComplete != expected.BackfillComplete {
 		t.Errorf("BackfillComplete = %v, want %v", cursor.BackfillComplete, expected.BackfillComplete)
+	}
+	if cursor.PublishedScannedPages != expected.PublishedScannedPages {
+		t.Errorf("PublishedScannedPages = %d, want %d", cursor.PublishedScannedPages, expected.PublishedScannedPages)
+	}
+	if cursor.PublishedBackfillComplete != expected.PublishedBackfillComplete {
+		t.Errorf("PublishedBackfillComplete = %v, want %v", cursor.PublishedBackfillComplete, expected.PublishedBackfillComplete)
 	}
 
 	// Update cursor

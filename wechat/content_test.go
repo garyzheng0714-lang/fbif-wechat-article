@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func TestCleanToPlainText(t *testing.T) {
+func TestCleanHTMLToPlainText(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
@@ -54,9 +54,9 @@ func TestCleanToPlainText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := cleanToPlainText(tt.input)
+			got := CleanHTMLToPlainText(tt.input)
 			if !tt.check(got) {
-				t.Errorf("cleanToPlainText(%q) = %q, check failed", tt.input, got)
+				t.Errorf("CleanHTMLToPlainText(%q) = %q, check failed", tt.input, got)
 			}
 		})
 	}

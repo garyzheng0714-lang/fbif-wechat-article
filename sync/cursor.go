@@ -9,9 +9,11 @@ import (
 )
 
 type SyncCursor struct {
-	OldestSyncedDate string `json:"oldestSyncedDate"`
-	NewestSyncedDate string `json:"newestSyncedDate"`
-	BackfillComplete bool   `json:"backfillComplete"`
+	OldestSyncedDate          string `json:"oldestSyncedDate"`
+	NewestSyncedDate          string `json:"newestSyncedDate"`
+	BackfillComplete          bool   `json:"backfillComplete"`
+	PublishedScannedPages     int    `json:"publishedScannedPages,omitempty"`
+	PublishedBackfillComplete bool   `json:"publishedBackfillComplete,omitempty"`
 }
 
 func getCursorPaths() []string {

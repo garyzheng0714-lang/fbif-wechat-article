@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
@@ -101,6 +103,7 @@ func feishuAppRequest(method, path string, body interface{}) (json.RawMessage, e
 var (
 	tableIDCache   = make(map[string]string)
 	tableIDCacheMu sync.Mutex
+	recordWriteMu  sync.Mutex
 )
 
 // GetOrCreateTable looks up or creates a Feishu Bitable table by name.
@@ -221,11 +224,13 @@ func EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
 		if existing[field.Name] {
 			continue
 		}
+		recordWriteMu.Lock()
 		log.Printf("[Feishu] Creating field: %s (type: %d)", field.Name, field.Type)
 		_, err := feishuRequest("POST", "/fields", map[string]interface{}{
 			"field_name": field.Name,
 			"type":       field.Type,
 		}, tableID)
+		recordWriteMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("create field %s: %w", field.Name, err)
 		}
@@ -290,6 +295,133 @@ type SyncResult struct {
 	Updated int `json:"updated,omitempty"`
 }
 
+type Record struct {
+	RecordID string
+	Fields   map[string]interface{}
+}
+
+func ListRecords(tableID string, fieldNames []string) ([]Record, error) {
+	var records []Record
+	pageToken := ""
+	useFieldNames := len(fieldNames) > 0
+
+	for {
+		params := url.Values{"page_size": {"500"}}
+		if useFieldNames {
+			params.Set("field_names", strings.Join(fieldNames, ","))
+		}
+		if pageToken != "" {
+			params.Set("page_token", pageToken)
+		}
+
+		data, err := feishuRequest("GET", "/records?"+params.Encode(), nil, tableID)
+		if err != nil {
+			if useFieldNames && strings.Contains(err.Error(), "InvalidFieldNames") {
+				log.Printf("[Feishu] ListRecords: field_names not yet valid, falling back to full fields")
+				useFieldNames = false
+				pageToken = ""
+				records = nil
+				continue
+			}
+			return nil, err
+		}
+
+		var result struct {
+			Items []struct {
+				RecordID string                 `json:"record_id"`
+				Fields   map[string]interface{} `json:"fields"`
+			} `json:"items"`
+			HasMore   bool   `json:"has_more"`
+			PageToken string `json:"page_token"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, fmt.Errorf("parse records: %w", err)
+		}
+
+		for _, item := range result.Items {
+			records = append(records, Record{
+				RecordID: item.RecordID,
+				Fields:   item.Fields,
+			})
+		}
+
+		if !result.HasMore {
+			break
+		}
+		pageToken = result.PageToken
+	}
+
+	return records, nil
+}
+
+func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) error {
+	for i := 0; i < len(records); i += 500 {
+		end := i + 500
+		if end > len(records) {
+			end = len(records)
+		}
+		batch := records[i:end]
+		recordWriteMu.Lock()
+		_, err := feishuRequest("POST", "/records/batch_update", map[string]interface{}{
+			"records": batch,
+		}, tableID)
+		recordWriteMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("batch update (offset %d): %w", i, err)
+		}
+		log.Printf("[Feishu] Batch updated %d records (%d/%d)", len(batch), i+len(batch), len(records))
+	}
+	return nil
+}
+
+func FieldString(fields map[string]interface{}, name string) string {
+	v, ok := fields[name]
+	if !ok || v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case map[string]interface{}:
+		if link, ok := t["link"].(string); ok {
+			return link
+		}
+	case []interface{}:
+		var parts []string
+		for _, el := range t {
+			if m, ok := el.(map[string]interface{}); ok {
+				if s, ok := m["text"].(string); ok {
+					parts = append(parts, s)
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func FieldInt64(fields map[string]interface{}, name string) int64 {
+	v, ok := fields[name]
+	if !ok || v == nil {
+		return 0
+	}
+	switch t := v.(type) {
+	case float64:
+		return int64(t)
+	case int64:
+		return t
+	case int:
+		return int64(t)
+	case json.Number:
+		n, _ := t.Int64()
+		return n
+	case string:
+		n, _ := strconv.ParseInt(t, 10, 64)
+		return n
+	}
+	return 0
+}
+
 func SyncRecordsInsertOnly(records []SyncRecord, keyField, tableID string) (*SyncResult, error) {
 	if len(records) == 0 {
 		return &SyncResult{}, nil
@@ -318,9 +450,11 @@ func SyncRecordsInsertOnly(records []SyncRecord, keyField, tableID string) (*Syn
 			end = len(createList)
 		}
 		batch := createList[i:end]
+		recordWriteMu.Lock()
 		_, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
 			"records": batch,
 		}, tableID)
+		recordWriteMu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("batch create: %w", err)
 		}
@@ -362,9 +496,11 @@ func SyncRecordsUpsert(records []SyncRecord, keyField, tableID string) (*SyncRes
 			end = len(createList)
 		}
 		batch := createList[i:end]
+		recordWriteMu.Lock()
 		_, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
 			"records": batch,
 		}, tableID)
+		recordWriteMu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("batch create: %w", err)
 		}
@@ -379,9 +515,11 @@ func SyncRecordsUpsert(records []SyncRecord, keyField, tableID string) (*SyncRes
 			end = len(updateList)
 		}
 		batch := updateList[i:end]
+		recordWriteMu.Lock()
 		_, err := feishuRequest("POST", "/records/batch_update", map[string]interface{}{
 			"records": batch,
 		}, tableID)
+		recordWriteMu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("batch update: %w", err)
 		}

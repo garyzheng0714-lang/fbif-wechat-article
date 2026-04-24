@@ -1,20 +1,21 @@
 # fbif-wechat-article
 
-一个轻量的 GO 同步服务，用于把微信公众号已发布文章同步到飞书多维表格。
+`fbif-wechat-article` 是一个轻量级 Go 同步服务，用于把微信公众号已发布文章同步到飞书多维表格。服务以单一二进制运行，主同步、媒体补齐和历史素材回填相互隔离，适合部署在低配置 Linux 服务器上长期运行。
 
-## 当前定位
+## 功能概览
 
-- 单一 GO 二进制部署
-- 主流程只负责同步公众号文章主数据
-- 媒体补齐独立为后台 worker，不阻塞主同步
-- 历史素材回填独立为后台 worker，自动断点续传
-- 适合部署在低配置 Linux 服务器
+- 使用微信公众号 `freepublish/batchget` 接口同步已发布文章。
+- 将文章元数据、正文内容、封面信息和同步状态写入飞书多维表格。
+- 启动后自动执行一次同步，并由内置 scheduler 每天 `09:00` 再次同步。
+- 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
+- 媒体 worker 可后台补齐封面图链接和正文图片链接。
+- 历史素材 worker 可通过 `material/batchget_material` 回填素材库旧文章。
+- 图片可优先转存到阿里云 OSS；未配置 OSS 时回退到本地 `/media/` 静态目录。
+- 提供最小 HTTP API，用于健康检查、手动触发同步和查看 cursor。
 
-## 当前同步内容
+## 同步字段
 
-主表：`公众号文章`
-
-已同步字段：
+默认写入的主表为 `公众号文章`。当前同步字段包括：
 
 - `文章标题`
 - `唯一键`
@@ -38,64 +39,64 @@
 - `正文图片链接`
 - `同步时间`
 
-## 运行机制
+## 技术栈
 
-### 1. 主同步
+- Go `1.26.1`
+- 标准库 `net/http` HTTP 服务
+- 微信公众号官方 API
+- 飞书开放平台与多维表格 API
+- 可选阿里云 OSS 媒体存储
 
-主同步使用微信公众号官方 `freepublish/batchget` 接口：
+## 项目结构
 
-- 启动时自动执行一次轻量同步
-- 每天 `09:00` 自动同步
-- 默认只扫描最近 `3` 页
-- 历史页进度由 `cursor` 记录
-- 支持通过 `WECHAT_SYNC_COVER_INLINE` / `WECHAT_SYNC_BODY_IMAGES_INLINE` 在主同步中内联补齐封面和正文图片（默认关闭）
+```text
+.
+├── main.go              # HTTP 服务、worker 启动和运行时配置
+├── config/              # 环境变量和 .env 加载
+├── sync/                # 主同步、scheduler、cursor、媒体和历史 worker
+├── wechat/              # 微信 API、token、素材、正文和图片处理
+├── feishu/              # 飞书 token 与多维表格写入
+├── .env.example         # 环境变量示例
+└── go.mod
+```
 
-### 2. 媒体 worker
+## Getting Started
 
-媒体 worker 独立运行（默认启用）：
+1. 准备环境变量：
 
-- 补齐 `封面图链接`
-- 补齐 `正文图片链接`
-- 图片优先转存到阿里云 OSS；未配置 OSS 时回退到本地 `/media/` 目录
-- 不影响主同步稳定性
+   ```bash
+   cp .env.example .env
+   ```
 
-### 3. 历史素材 worker
+2. 填写微信公众号、飞书和 API key 配置。
 
-历史素材 worker 独立运行（默认启用），通过 `material/batchget_material` 接口回填旧文章：
+3. 运行测试：
 
-- 分页遍历素材库中的图文消息
-- 进度由 `cursor.materialNewsOffset` 记录，支持断点续传
-- 内置配额感知，达到限额自动暂停
-- 不影响主同步和媒体 worker 稳定性
+   ```bash
+   go test ./...
+   ```
 
-### 4. Cursor
+4. 本地启动服务：
 
-`cursor` 是同步进度文件（`.sync-cursor.json`），不是业务数据。
+   ```bash
+   go run .
+   ```
 
-它记录：
+5. 构建二进制：
 
-- 已发布文章列表扫到第几页（`publishedScannedPages`）
-- 已发布文章历史是否已经扫完（`publishedBackfillComplete`）
-- 素材库回填偏移量（`materialNewsOffset`）
-- 素材库回填是否完成（`materialBackfillComplete`）
+   ```bash
+   go build -o wechat-sync .
+   ```
 
-作用：
+Linux amd64 服务器构建示例：
 
-- 避免重复全量抓取
-- 服务重启后从上次进度继续
+```bash
+GOOS=linux GOARCH=amd64 go build -o wechat-sync .
+```
 
-## 资源占用
+## 配置
 
-当前线上实测：
-
-- 常驻 RSS 约 `25MB ~ 30MB`
-- 设置 GO 内存上限默认 `512MB`
-
-适合低配服务器运行。
-
-## 环境变量
-
-最少需要：
+最少需要配置：
 
 - `WECHAT_APPID`
 - `WECHAT_SECRET`
@@ -104,10 +105,10 @@
 - `FEISHU_BITABLE_APP_TOKEN`
 - `API_KEY`
 
-可选：
+常用可选项：
 
-- `SERVER_PORT`
-- `GO_MEMORY_LIMIT_MB`
+- `SERVER_PORT`，默认 `3002`
+- `GO_MEMORY_LIMIT_MB`，默认 `512`
 - `FEISHU_RECORD_BATCH_SIZE`
 - `WECHAT_DAILY_QUOTA_LIMIT`
 - `WECHAT_DAILY_QUOTA_RESERVE`
@@ -118,7 +119,7 @@
 - `WECHAT_SYNC_BODY_IMAGES_INLINE`
 - `PUBLIC_MEDIA_DIR`
 
-媒体 worker（默认启用）：
+媒体 worker：
 
 - `ENABLE_MEDIA_WORKER`
 - `MEDIA_WORKER_BATCH_SIZE`
@@ -126,7 +127,7 @@
 - `MEDIA_WORKER_INITIAL_DELAY_SECONDS`
 - `MEDIA_WORKER_INTERVAL_MINUTES`
 
-历史素材 worker（默认启用）：
+历史素材 worker：
 
 - `ENABLE_HISTORY_WORKER`
 - `HISTORY_WORKER_INITIAL_DELAY_SECONDS`
@@ -135,7 +136,7 @@
 - `MATERIAL_HISTORY_MAX_CALLS_PER_RUN`
 - `HISTORY_WORKER_WRITE_PAUSE_MS`
 
-阿里云 OSS（未配置时回退到本地 `./media/` 目录）：
+阿里云 OSS：
 
 - `OSS_ACCESS_KEY_ID`
 - `OSS_ACCESS_KEY_SECRET`
@@ -143,56 +144,64 @@
 - `OSS_REGION`
 - `OSS_BUCKET_DOMAIN`
 
-完整示例见 `.env.example`。
+完整示例见 [.env.example](.env.example)。
 
-## HTTP 接口
+## HTTP API
 
-只保留最小接口：
+| Method | Path | Description | Auth |
+| --- | --- | --- | --- |
+| `GET` | `/health` | 健康检查，返回 token 状态和 cursor 摘要 | 不需要 |
+| `POST` | `/api/feishu/sync` | 手动触发一次同步 | `API_KEY` |
+| `GET` | `/api/feishu/cursor` | 查看同步进度 cursor | `API_KEY` |
 
-- `GET /health`
-- `POST /api/feishu/sync`
-- `GET /api/feishu/cursor`
+受保护接口支持两种鉴权方式：
 
-除了 `/health`，其余接口都需要 `API_KEY`。
-
-支持两种传法：
-
-- `Authorization: Bearer <token>`
-- `X-API-Key: <token>`
-
-## 构建
-
-本地：
-
-```bash
-go test ./...
-go build -o wechat-sync .
+```http
+Authorization: Bearer <token>
+X-API-Key: <token>
 ```
 
-Linux 服务器：
+## 运行机制
 
-```bash
-GOOS=linux GOARCH=amd64 go build -o wechat-sync .
-```
+### 主同步
+
+- 启动时自动执行一次轻量同步。
+- 每天 `09:00` 自动同步。
+- 默认只扫描最近 `3` 页。
+- 历史页进度由 cursor 记录。
+- 可通过 `WECHAT_SYNC_COVER_INLINE` 和 `WECHAT_SYNC_BODY_IMAGES_INLINE` 在主同步中内联补齐图片，默认关闭。
+
+### 媒体 worker
+
+- 默认启用。
+- 补齐 `封面图链接` 和 `正文图片链接`。
+- 优先写入 OSS；未配置 OSS 时写入本地 `PUBLIC_MEDIA_DIR` 或 `./media`。
+- 不阻塞主同步。
+
+### 历史素材 worker
+
+- 默认启用。
+- 分页遍历素材库中的图文消息。
+- 使用 `cursor.materialNewsOffset` 断点续传。
+- 内置配额感知，达到限制后自动暂停。
+
+### Cursor
+
+`.sync-cursor.json` 是本地同步进度文件，不是业务数据。它记录：
+
+- 已发布文章列表扫描页数。
+- 已发布文章历史是否扫描完成。
+- 素材库回填偏移量。
+- 素材库回填是否完成。
 
 ## 部署建议
 
-推荐 systemd 方式部署：
-
-- 工作目录只放一个二进制和一个 `.env`
-- 使用 systemd 守护
-- 不要把重型迁移脚本放进日常流程
+- 使用 systemd 或类似进程管理器托管编译后的二进制。
+- 工作目录保留二进制、`.env`、`.sync-cursor.json` 和可选 `media/`。
+- 不要把一次性迁移或重型脚本放进常驻同步服务的启动流程。
 
 ## 设计原则
 
-- 主同步必须稳定
-- 媒体补齐、历史回填不能阻塞主同步
-- 模块可以继续扩展
-
-后续如果增加：
-
-- 每月阅读数据
-- 知识库索引
-- 问答增强
-
-都应该作为独立模块挂接，不污染主同步链路。
+- 主同步链路优先保证稳定。
+- 媒体补齐和历史回填不能影响主同步。
+- 后续阅读数据、知识库索引或问答增强等能力应作为独立模块接入。

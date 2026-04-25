@@ -1,6 +1,17 @@
 # fbif-wechat-article
 
-`fbif-wechat-article` 是一个轻量级 Go 同步服务，用于把微信公众号已发布文章同步到飞书多维表格。服务以单一二进制运行，主同步、媒体补齐和历史素材回填相互隔离，适合部署在低配置 Linux 服务器上长期运行。
+![类型：微信工具](https://img.shields.io/badge/%E7%B1%BB%E5%9E%8B-%E5%BE%AE%E4%BF%A1%E5%B7%A5%E5%85%B7-2f6fdd)
+![语言：Go](https://img.shields.io/badge/%E8%AF%AD%E8%A8%80-Go-00ADD8)
+![状态：维护中](https://img.shields.io/badge/%E7%8A%B6%E6%80%81-%E7%BB%B4%E6%8A%A4%E4%B8%AD-2ea44f)
+![README：中文](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-d73a49)
+
+`fbif-wechat-article` 是一个 Go 同步服务，用于把微信公众号已发布文章同步到飞书多维表格，并补齐封面、正文和媒体链接信息。
+
+## 仓库定位
+
+- 分类：微信工具 / FBIF 内容运营自动化。
+- 面向对象：需要把微信公众号文章沉淀到飞书多维表格的内容、运营和工程团队。
+- 使用边界：本仓库负责文章同步、媒体补齐和历史素材回填；不负责公众号后台编辑、阅读数据分析或知识库问答。
 
 ## 功能概览
 
@@ -11,7 +22,7 @@
 - 媒体 worker 可后台补齐封面图链接和正文图片链接。
 - 历史素材 worker 可通过 `material/batchget_material` 回填素材库旧文章。
 - 图片可优先转存到阿里云 OSS；未配置 OSS 时回退到本地 `/media/` 静态目录。
-- 提供最小 HTTP API，用于健康检查、手动触发同步和查看 cursor。
+- 提供健康检查、手动触发同步和查看 cursor 的 HTTP API。
 
 ## 同步字段
 
@@ -42,7 +53,7 @@
 ## 技术栈
 
 - Go `1.26.1`
-- 标准库 `net/http` HTTP 服务
+- 标准库 `net/http`
 - 微信公众号官方 API
 - 飞书开放平台与多维表格 API
 - 可选阿里云 OSS 媒体存储
@@ -60,35 +71,28 @@
 └── go.mod
 ```
 
-## Getting Started
+## 快速开始
 
-1. 准备环境变量：
+准备配置：
 
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+cp .env.example .env
+```
 
-2. 填写微信公众号、飞书和 API key 配置。
+填写微信公众号、飞书和 API key 配置后运行：
 
-3. 运行测试：
+```bash
+go test ./...
+go run .
+```
 
-   ```bash
-   go test ./...
-   ```
+构建二进制：
 
-4. 本地启动服务：
+```bash
+go build -o wechat-sync .
+```
 
-   ```bash
-   go run .
-   ```
-
-5. 构建二进制：
-
-   ```bash
-   go build -o wechat-sync .
-   ```
-
-Linux amd64 服务器构建示例：
+Linux amd64 构建示例：
 
 ```bash
 GOOS=linux GOARCH=amd64 go build -o wechat-sync .
@@ -148,11 +152,11 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 
 ## HTTP API
 
-| Method | Path | Description | Auth |
+| Method | Path | 说明 | 鉴权 |
 | --- | --- | --- | --- |
-| `GET` | `/health` | 健康检查，返回 token 状态和 cursor 摘要 | 不需要 |
-| `POST` | `/api/feishu/sync` | 手动触发一次同步 | `API_KEY` |
-| `GET` | `/api/feishu/cursor` | 查看同步进度 cursor | `API_KEY` |
+| `GET` | `/health` | 健康检查，返回 token 状态和 cursor 摘要。 | 不需要 |
+| `POST` | `/api/feishu/sync` | 手动触发一次同步。 | `API_KEY` |
+| `GET` | `/api/feishu/cursor` | 查看同步进度 cursor。 | `API_KEY` |
 
 受保护接口支持两种鉴权方式：
 
@@ -185,23 +189,14 @@ X-API-Key: <token>
 - 使用 `cursor.materialNewsOffset` 断点续传。
 - 内置配额感知，达到限制后自动暂停。
 
-### Cursor
-
-`.sync-cursor.json` 是本地同步进度文件，不是业务数据。它记录：
-
-- 已发布文章列表扫描页数。
-- 已发布文章历史是否扫描完成。
-- 素材库回填偏移量。
-- 素材库回填是否完成。
-
 ## 部署建议
 
 - 使用 systemd 或类似进程管理器托管编译后的二进制。
 - 工作目录保留二进制、`.env`、`.sync-cursor.json` 和可选 `media/`。
 - 不要把一次性迁移或重型脚本放进常驻同步服务的启动流程。
 
-## 设计原则
+## 注意事项
 
-- 主同步链路优先保证稳定。
-- 媒体补齐和历史回填不能影响主同步。
-- 后续阅读数据、知识库索引或问答增强等能力应作为独立模块接入。
+- `.sync-cursor.json` 是本地同步进度文件，不是业务数据。
+- 主同步链路优先保证稳定，媒体补齐和历史回填不应影响主同步。
+- 后续阅读数据、知识库索引或问答增强能力应作为独立模块接入。

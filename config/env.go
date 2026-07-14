@@ -28,8 +28,8 @@ func Init() {
 	Env = Config{
 		NodeEnv:               getEnvDefault("NODE_ENV", "development"),
 		ServerPort:            getEnvInt("SERVER_PORT", 3002),
-		WechatAppID:           os.Getenv("WECHAT_APPID"),
-		WechatSecret:          os.Getenv("WECHAT_SECRET"),
+		WechatAppID:           getEnvFirst("WECHAT_APPID", "WECHAT_MP_APPID"),
+		WechatSecret:          getEnvFirst("WECHAT_SECRET", "WECHAT_APPSECRET", "WECHAT_MP_SECRET"),
 		FeishuAppID:           os.Getenv("FEISHU_APP_ID"),
 		FeishuAppSecret:       os.Getenv("FEISHU_APP_SECRET"),
 		FeishuBitableAppToken: os.Getenv("FEISHU_BITABLE_APP_TOKEN"),
@@ -40,6 +40,15 @@ func Init() {
 	if Env.WechatAppID == "" || Env.WechatSecret == "" {
 		log.Println("[Warning] WECHAT_APPID or WECHAT_SECRET not set. API calls will fail.")
 	}
+}
+
+func getEnvFirst(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func loadDotEnv() {

@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -14,8 +15,7 @@ import (
 func RunDailySync() error {
 	cfg := config.Env
 	if cfg.WechatAppID == "" || cfg.WechatSecret == "" {
-		log.Println("[Scheduler] Skipping sync: WeChat credentials not configured")
-		return nil
+		return fmt.Errorf("WeChat credentials not configured")
 	}
 
 	if _, err := wechat.GetToken(); err != nil {

@@ -183,8 +183,20 @@ jobs:
             systemctl enable "${SERVICE_NAME}"
             systemctl start "${SERVICE_NAME}"
 
-            sleep 3
-            curl -fsS "http://127.0.0.1:3002/health" >/dev/null
+            # Health becomes 200 only after all active official analytics
+            # endpoints have succeeded. Poll instead of accepting a fake
+            # process-only health response.
+            for attempt in $(seq 1 60); do
+              if curl -fsS "http://127.0.0.1:3002/health" >/dev/null; then
+                break
+              fi
+              if [ "${attempt}" -eq 60 ]; then
+                journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
+                echo "Official API readiness did not become healthy"
+                exit 1
+              fi
+              sleep 3
+            done
 
             echo "Deploy complete: $(${BINARY} --version 2>/dev/null || echo 'binary installed')"
           REMOTE_SCRIPT

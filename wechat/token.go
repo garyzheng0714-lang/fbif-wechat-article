@@ -1,11 +1,12 @@
 package wechat
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
@@ -18,9 +19,10 @@ type tokenState struct {
 }
 
 var (
-	cachedToken *tokenState
-	tokenMu     sync.Mutex
-	httpClient  = &http.Client{Timeout: 30 * time.Second}
+	cachedToken    *tokenState
+	tokenMu        sync.Mutex
+	httpClient     = &http.Client{Timeout: 30 * time.Second}
+	stableTokenURL = "https://api.weixin.qq.com/cgi-bin/stable_token"
 )
 
 func fetchToken() (*tokenState, error) {
@@ -29,18 +31,24 @@ func fetchToken() (*tokenState, error) {
 		return nil, fmt.Errorf("WeChat credentials not configured")
 	}
 
-	u, _ := url.Parse("https://api.weixin.qq.com/cgi-bin/token")
-	q := u.Query()
-	q.Set("grant_type", "client_credential")
-	q.Set("appid", cfg.WechatAppID)
-	q.Set("secret", cfg.WechatSecret)
-	u.RawQuery = q.Encode()
-
-	resp, err := httpClient.Get(u.String())
+	body, err := json.Marshal(map[string]interface{}{
+		"grant_type":    "client_credential",
+		"appid":         cfg.WechatAppID,
+		"secret":        cfg.WechatSecret,
+		"force_refresh": false,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch token: %w", err)
+		return nil, fmt.Errorf("encode stable token request: %w", err)
+	}
+	resp, err := httpClient.Post(stableTokenURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("fetch stable token: %w", err)
 	}
 	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read stable token response: %w", err)
+	}
 
 	var data struct {
 		AccessToken string `json:"access_token"`
@@ -48,11 +56,17 @@ func fetchToken() (*tokenState, error) {
 		ErrCode     int    `json:"errcode"`
 		ErrMsg      string `json:"errmsg"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.Unmarshal(responseBody, &data); err != nil {
 		return nil, fmt.Errorf("decode token response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("WeChat stable token HTTP %d: %s", resp.StatusCode, data.ErrMsg)
 	}
 	if data.ErrCode != 0 {
 		return nil, fmt.Errorf("WeChat token error %d: %s", data.ErrCode, data.ErrMsg)
+	}
+	if data.AccessToken == "" || data.ExpiresIn <= 0 {
+		return nil, fmt.Errorf("WeChat stable token response missing access_token or expires_in")
 	}
 
 	expiresAt := time.Now().Add(time.Duration(data.ExpiresIn-600) * time.Second)

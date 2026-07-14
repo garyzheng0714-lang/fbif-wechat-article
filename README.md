@@ -5,17 +5,23 @@
 ![状态：维护中](https://img.shields.io/badge/%E7%8A%B6%E6%80%81-%E7%BB%B4%E6%8A%A4%E4%B8%AD-2ea44f)
 ![README：中文](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-d73a49)
 
-`fbif-wechat-article` 是一个 Go 同步服务，用于把微信公众号已发布文章同步到飞书多维表格，并补齐封面、正文和媒体链接信息。
+`fbif-wechat-article` 是一个只使用微信公众号官方 API 的归档与数据采集服务。它完整保存素材、草稿、发表记录、文章详情和数据分析响应，并可把官方发表正文自动送入排版待审流程或继续同步到飞书多维表格。
 
 ## 仓库定位
 
 - 分类：微信工具 / FBIF 内容运营自动化。
 - 面向对象：需要把微信公众号文章沉淀到飞书多维表格的内容、运营和工程团队。
-- 使用边界：本仓库负责文章同步、媒体补齐和历史素材回填；不负责公众号后台编辑、阅读数据分析或知识库问答。
+- 使用边界：本仓库负责官方接口归档、阅读数据采集、历史补采、自动排版投递和飞书同步；不抓公众号网页，不使用 RSS/订阅源，不负责公众号后台编辑或知识库问答。
 
 ## 功能概览
 
 - 使用微信公众号 `freepublish/batchget` 接口同步已发布文章。
+- 覆盖微信文档中的 21 个数据接口：15 个现役接口每日采集，6 个已下线旧接口保留一次 `47009` 官方响应和替代接口说明。
+- 采集文章阅读、分享、在看、点赞、评论、收藏、赞赏、阅读完成率、阅读来源，以及用户、消息和接口分析数据。
+- 覆盖素材、草稿、发表记录、文章详情、评论、群发/发布状态等 11 个内容侧读取接口；需要 `publish_id` 或 `msg_id` 的状态接口通过受保护的手动调用入口执行。
+- 所有响应先按原始字节写入 SQLite，再生成可查询的文章指标行；微信新增字段无需改结构即可留存。
+- 每天 `08:30` 先抓昨天及最近 30 天仍会变化的数据，再用剩余配额从官方最早可用日期断点回填。
+- 可每 `15` 分钟轮询官方 `freepublish/batchget`：新文章正文经持久化 outbox 投递给排版服务，直接进入 `ft-default` 排版和待审核草稿；不回源抓网页，也不会自动公开。
 - 将文章元数据、正文内容、封面信息和同步状态写入飞书多维表格。
 - 启动后自动执行一次同步，并由内置 scheduler 每天 `09:00` 再次同步。
 - 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
@@ -54,6 +60,7 @@
 
 - Go `1.26.1`
 - 标准库 `net/http`
+- SQLite（`modernc.org/sqlite`，无 CGO）
 - 微信公众号官方 API
 - 飞书开放平台与多维表格 API
 - 可选阿里云 OSS 媒体存储
@@ -64,6 +71,9 @@
 .
 ├── main.go              # HTTP 服务、worker 启动和运行时配置
 ├── config/              # 环境变量和 .env 加载
+├── analytics/           # 21 个数据接口、内容接口采集器和调度
+├── archive/             # SQLite 原始响应、指标行、游标和内容归档
+├── autolayout/          # 官方发表正文的基线、持久 outbox 与排版投递
 ├── sync/                # 主同步、scheduler、cursor、媒体和历史 worker
 ├── wechat/              # 微信 API、token、素材、正文和图片处理
 ├── feishu/              # 飞书 token 与多维表格写入
@@ -108,6 +118,25 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `FEISHU_APP_SECRET`
 - `FEISHU_BITABLE_APP_TOKEN`
 - `API_KEY`
+
+官方采集器：
+
+- `OFFICIAL_API_DB_PATH`，默认 `./data/wechat-official.db`
+- `ANALYTICS_MAX_CALLS_PER_RUN`，默认 `500`
+- `CONTENT_MAX_CALLS_PER_RUN`，默认 `200`
+- `ANALYTICS_BACKFILL_START`，可限制历史补采起点；不填时按各接口官方起始日期
+- `OFFICIAL_COLLECTOR_INITIAL_DELAY_SECONDS`，默认 `5`
+- `ENABLE_OFFICIAL_API_COLLECTOR`，默认开启
+- `ENABLE_FEISHU_SYNC`，默认开启；只运行官方归档时可设为 `0`
+
+自动排版（显式开启）：
+
+- `ENABLE_AUTO_LAYOUT=1`
+- `LAYOUT_OFFICIAL_SYNC_URL`，排版服务的 `/api/publish/official-sync` 完整地址
+- `LAYOUT_ADMIN_PASSWORD`，排版服务管理密码
+- `LAYOUT_SOURCE_NAME`，默认 `FBIF食品饮料创新`
+- `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`，默认 `15`
+- `AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN`，默认 `20`
 
 常用可选项：
 
@@ -157,6 +186,10 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 | `GET` | `/health` | 健康检查，返回 token 状态和 cursor 摘要。 | 不需要 |
 | `POST` | `/api/feishu/sync` | 手动触发一次同步。 | `API_KEY` |
 | `GET` | `/api/feishu/cursor` | 查看同步进度 cursor。 | `API_KEY` |
+| `GET` | `/api/wechat/official/status` | 查看 15 个现役接口、6 个下线接口、回填游标和存储统计。 | `API_KEY` |
+| `GET` | `/api/wechat/official/endpoints` | 查看全部数据与内容接口清单、生命周期和必填标识符。 | `API_KEY` |
+| `POST` | `/api/wechat/official/collect` | 立即执行一次完整增量采集。 | `API_KEY` |
+| `POST` | `/api/wechat/official/call` | 调用白名单内单个官方接口并归档原始响应。 | `API_KEY` |
 
 受保护接口支持两种鉴权方式：
 
@@ -166,6 +199,22 @@ X-API-Key: <token>
 ```
 
 ## 运行机制
+
+### 官方 API 采集
+
+- 服务启动后自动采集一次，此后每天北京时间 `08:30` 执行。
+- 15 个现役数据接口必须全部成功，`/health` 才返回 `200`；缺密钥、白名单、权限或接口错误均返回 `503`。
+- `getarticletotaldetail` 会重复刷新最近 30 个发表日；其他接口按官方最大跨度拆分并断点回填。
+- 每次请求和响应都留档。相同请求得到完全相同的响应时，后续记录引用第一份原始字节，避免重复正文写满磁盘。
+- 可用 `./wechat-sync collect-once` 做一次性采集和服务器验收。
+
+### 自动排版
+
+- 第一次启用时，库内已有 `freepublish` 文章只登记为历史基线，不会批量创建旧稿。
+- 此后每 `15` 分钟仅调用微信官方 `freepublish/batchget` 最新页；多图文中的每篇文章独立去重和投递。
+- 标题、作者、正文 HTML、封面和文章 URL 全部取自官方响应；只有链接、没有官方正文的数据分析记录不会进入排版。
+- outbox 在 SQLite 中持久化，网络失败或服务重启后继续重试；公众号 URL 的 `sn/chksm/scene` 变化不会造成重复稿。
+- 排版服务自动流程只到 `awaiting_review`，不会代替人工批准，也不会自动公开到 FoodTalks。
 
 ### 主同步
 
@@ -199,4 +248,5 @@ X-API-Key: <token>
 
 - `.sync-cursor.json` 是本地同步进度文件，不是业务数据。
 - 主同步链路优先保证稳定，媒体补齐和历史回填不应影响主同步。
-- 后续阅读数据、知识库索引或问答增强能力应作为独立模块接入。
+- 6 个旧文章分析接口已由微信返回 `47009 this api is offline, please use the new api`；服务不会无限重试，而是记录下线响应并使用新接口。
+- 微信官方 API 没有“全部群发文章正文列表”接口；本服务只保存官方接口实际返回的数据，不用网页或订阅源补造。

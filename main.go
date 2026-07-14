@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,14 +13,42 @@ import (
 	"strings"
 	"time"
 
+	"github.com/garyzheng0714-lang/fbif-wechat-article/analytics"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
 	appSync "github.com/garyzheng0714-lang/fbif-wechat-article/sync"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
+var officialRuntime *analytics.Runtime
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("wechat-sync official-api-collector")
+		return
+	}
 	config.Init()
 	configureRuntime()
+	if analytics.Enabled() {
+		var err error
+		officialRuntime, err = analytics.NewRuntimeFromEnv()
+		if err != nil {
+			log.Fatalf("initialize official API collector: %v", err)
+		}
+		defer officialRuntime.Close()
+	} else {
+		log.Println("[Warning] Official API collector explicitly disabled")
+	}
+	if len(os.Args) > 1 && os.Args[1] == "collect-once" {
+		if officialRuntime == nil {
+			log.Fatal("official API collector disabled")
+		}
+		result, err := officialRuntime.Run(context.Background())
+		_ = json.NewEncoder(os.Stdout).Encode(result)
+		if err != nil {
+			log.Fatalf("official API collection completed with errors: %v", err)
+		}
+		return
+	}
 
 	mux := http.NewServeMux()
 	if !ossConfigured() {
@@ -37,18 +67,28 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/feishu/sync", requireAPIKey(syncHandler))
 	mux.HandleFunc("/api/feishu/cursor", requireAPIKey(cursorHandler))
+	mux.HandleFunc("/api/wechat/official/status", requireAPIKey(officialStatusHandler))
+	mux.HandleFunc("/api/wechat/official/endpoints", requireAPIKey(officialEndpointsHandler))
+	mux.HandleFunc("/api/wechat/official/collect", requireAPIKey(officialCollectHandler))
+	mux.HandleFunc("/api/wechat/official/call", requireAPIKey(officialCallHandler))
 
 	stopCh := make(chan struct{})
-	appSync.StartScheduler(stopCh)
-	appSync.StartMediaWorker(stopCh)
-	appSync.StartHistoryWorker(stopCh)
-
-	go func() {
-		log.Println("[Startup] Running initial sync...")
-		if err := appSync.RunDailySync(); err != nil {
-			log.Printf("[Startup] Daily sync failed: %v", err)
-		}
-	}()
+	if featureEnabled("ENABLE_FEISHU_SYNC", true) {
+		appSync.StartScheduler(stopCh)
+		appSync.StartMediaWorker(stopCh)
+		appSync.StartHistoryWorker(stopCh)
+		go func() {
+			log.Println("[Startup] Running initial Feishu sync...")
+			if err := appSync.RunDailySync(); err != nil {
+				log.Printf("[Startup] Feishu sync failed: %v", err)
+			}
+		}()
+	} else {
+		log.Println("[Startup] Feishu sync disabled by ENABLE_FEISHU_SYNC=0")
+	}
+	if officialRuntime != nil {
+		officialRuntime.Start(stopCh)
+	}
 
 	addr := fmt.Sprintf(":%d", config.Env.ServerPort)
 	log.Printf("Server running on http://localhost%s", addr)
@@ -85,6 +125,14 @@ func ossConfigured() bool {
 		strings.TrimSpace(os.Getenv("OSS_BUCKET_DOMAIN")) != ""
 }
 
+func featureEnabled(key string, defaultValue bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return defaultValue
+	}
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
 func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if config.Env.APIKey == "" {
@@ -111,10 +159,29 @@ func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	cursor, _ := appSync.ReadCursor()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":      "ok",
+	statusCode := http.StatusServiceUnavailable
+	statusLabel := "unhealthy"
+	officialStatus := interface{}(map[string]interface{}{
+		"ready":  false,
+		"reason": "官方 API 采集器已禁用",
+	})
+	if officialRuntime != nil {
+		status, err := officialRuntime.Status(r.Context())
+		if err != nil {
+			officialStatus = map[string]interface{}{"ready": false, "error": err.Error()}
+		} else {
+			officialStatus = status
+			if status.Ready {
+				statusCode = http.StatusOK
+				statusLabel = "ok"
+			}
+		}
+	}
+	writeJSON(w, statusCode, map[string]interface{}{
+		"status":      statusLabel,
 		"tokenStatus": wechat.GetTokenStatus(),
 		"cursor":      cursor,
+		"officialAPI": officialStatus,
 	})
 }
 
@@ -144,6 +211,119 @@ func cursorHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"cursor":  cursor,
+	})
+}
+
+func officialStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": "GET only"})
+		return
+	}
+	if officialRuntime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "official API collector disabled"})
+		return
+	}
+	status, err := officialRuntime.Status(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	statusCode := http.StatusOK
+	if !status.Ready {
+		statusCode = http.StatusServiceUnavailable
+	}
+	writeJSON(w, statusCode, map[string]interface{}{"success": status.Ready, "status": status})
+}
+
+func officialEndpointsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": "GET only"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"analytics": wechat.AllDataCubeEndpoints(),
+		"content":   wechat.AllContentEndpoints(),
+	})
+}
+
+func officialCollectHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": "POST only"})
+		return
+	}
+	if officialRuntime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "official API collector disabled"})
+		return
+	}
+	result, err := officialRuntime.Run(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"success": false, "result": result, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "result": result})
+}
+
+func officialCallHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": "POST only"})
+		return
+	}
+	if officialRuntime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "official API collector disabled"})
+		return
+	}
+	var request struct {
+		Endpoint  string          `json:"endpoint"`
+		BeginDate string          `json:"begin_date"`
+		EndDate   string          `json:"end_date"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if _, ok := wechat.DataCubeEndpointByName(request.Endpoint); ok {
+		if request.BeginDate == "" || request.EndDate == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "begin_date and end_date are required"})
+			return
+		}
+		calls, err := officialRuntime.Analytics.CollectRange(r.Context(), request.Endpoint, request.BeginDate, request.EndDate)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{"success": false, "calls": calls, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "calls": calls})
+		return
+	}
+	if _, ok := wechat.ContentEndpointByName(request.Endpoint); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "unknown or non-whitelisted endpoint"})
+		return
+	}
+	var payload interface{}
+	if len(request.Payload) > 0 && string(request.Payload) != "null" {
+		if err := json.Unmarshal(request.Payload, &payload); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "invalid payload"})
+			return
+		}
+	}
+	response, err := officialRuntime.Content.CallAndArchive(r.Context(), request.Endpoint, payload)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	var body interface{}
+	if json.Valid(response.Body) {
+		body = json.RawMessage(response.Body)
+	} else {
+		body = base64.StdEncoding.EncodeToString(response.Body)
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":    true,
+		"httpStatus": response.HTTPStatus,
+		"body":       body,
 	})
 }
 

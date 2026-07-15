@@ -91,25 +91,35 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 
 	result := &CombinedRunResult{}
 	pollInterval := time.Duration(envInt("AUTO_LAYOUT_POLL_INTERVAL_MINUTES", 15)) * time.Minute
+	runNow := time.Now()
+	monitorRecent := withinLayoutMonitoringWindow(runNow)
+	contentMinimum := 0
+	if monitorRecent {
+		contentMinimum = 2
+	}
 
-	// 先把最新已发布文章、图集类型和文章详情落库。历史详情也按剩余额度执行，
-	// 但必须给今天余下的 15 分钟发布轮询留出固定预算。
+	// 工作时段内先刷新最新已发布文章和图集类型；时段外只推进历史详情，
+	// 不调用最新草稿与发布页。两者都为今天余下的工作时段轮询留出预算。
 	contentConfiguredMax := r.Content.MaxCalls
 	quotaBeforeContent := wechat.CurrentDailyQuotaStatus()
 	contentBudget, contentPollReserve := quotaAwareCallBudget(
-		contentConfiguredMax, quotaBeforeContent.UsableRemaining, time.Now(), pollInterval, r.Layout != nil, 2,
+		contentConfiguredMax, quotaBeforeContent.UsableRemaining, runNow, pollInterval, r.Layout != nil, contentMinimum,
 	)
 	var contentErr error
 	if contentBudget > 0 {
 		r.Content.MaxCalls = contentBudget
-		result.Content, contentErr = r.Content.Run(ctx)
+		if monitorRecent {
+			result.Content, contentErr = r.Content.Run(ctx)
+		} else {
+			result.Content, contentErr = r.Content.RunBackfill(ctx)
+		}
 		r.Content.MaxCalls = contentConfiguredMax
 	} else {
 		nowMs := time.Now().UnixMilli()
 		result.Content = &ContentRunResult{StartedAt: nowMs, FinishedAt: nowMs}
 	}
 	if result.Content != nil {
-		log.Printf("[OfficialContent] budget=%d poll_reserve=%d calls=%d succeeded=%d failed=%d", contentBudget, contentPollReserve, result.Content.Calls, result.Content.Succeeded, result.Content.Failed)
+		log.Printf("[OfficialContent] monitor_recent=%t budget=%d poll_reserve=%d calls=%d succeeded=%d failed=%d", monitorRecent, contentBudget, contentPollReserve, result.Content.Calls, result.Content.Succeeded, result.Content.Failed)
 	}
 	if contentErr != nil {
 		log.Printf("[OfficialContent] Completed with errors: %v", contentErr)
@@ -130,7 +140,7 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 	analyticsConfiguredMax := r.Analytics.MaxCalls
 	quotaBeforeAnalytics := wechat.CurrentDailyQuotaStatus()
 	analyticsBudget, analyticsPollReserve := quotaAwareCallBudget(
-		analyticsConfiguredMax, quotaBeforeAnalytics.UsableRemaining, time.Now(), pollInterval, r.Layout != nil, 0,
+		analyticsConfiguredMax, quotaBeforeAnalytics.UsableRemaining, runNow, pollInterval, r.Layout != nil, 0,
 	)
 	var analyticsErr error
 	if analyticsBudget > 0 {
@@ -154,11 +164,7 @@ func quotaAwareCallBudget(configuredMax, usableRemaining int, now time.Time, pol
 		return 0, 0
 	}
 	if layoutEnabled && pollInterval > 0 {
-		localNow := now.In(wechat.ShanghaiLoc())
-		nextMidnight := time.Date(localNow.Year(), localNow.Month(), localNow.Day()+1, 0, 0, 0, 0, wechat.ShanghaiLoc())
-		remaining := nextMidnight.Sub(localNow)
-		polls := int((remaining + pollInterval - 1) / pollInterval)
-		pollReserve = polls * 2 // 每轮只调用 draft/batchget + freepublish/batchget。
+		pollReserve = remainingLayoutPollsToday(now, pollInterval) * 2
 	}
 	availableForRun := usableRemaining - pollReserve
 	if availableForRun < minimum {
@@ -295,12 +301,13 @@ func nextScheduledCollection(now time.Time) time.Time {
 
 func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {
 	interval := time.Duration(envInt("AUTO_LAYOUT_POLL_INTERVAL_MINUTES", 15)) * time.Minute
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	log.Printf("[AutoLayout] Polling official draft types + freepublish every %s", interval)
+	next := nextLayoutPoll(time.Now(), interval)
+	timer := time.NewTimer(time.Until(next))
+	defer timer.Stop()
+	log.Printf("[AutoLayout] Polling official draft types + freepublish every %s between 08:30 and 18:30; next at %s", interval, next.Format("2006-01-02 15:04:05"))
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			result, err := r.PollLayout(context.Background())
 			if result != nil {
 				log.Printf("[AutoLayout] poll discovered=%d skipped_newspic=%d held_unclassified=%d delivered=%d failed=%d", result.Discovered, result.SkippedNewspic, result.HeldUnclassified, result.Delivered, result.Failed)
@@ -308,10 +315,52 @@ func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {
 			if err != nil {
 				log.Printf("[AutoLayout] poll completed with errors: %v", err)
 			}
+			next = nextLayoutPoll(time.Now(), interval)
+			timer.Reset(time.Until(next))
 		case <-stopCh:
 			return
 		}
 	}
+}
+
+func withinLayoutMonitoringWindow(now time.Time) bool {
+	localNow := now.In(wechat.ShanghaiLoc())
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 30, 0, 0, wechat.ShanghaiLoc())
+	end := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 18, 30, 0, 0, wechat.ShanghaiLoc())
+	return !localNow.Before(start) && !localNow.After(end)
+}
+
+func nextLayoutPoll(now time.Time, interval time.Duration) time.Time {
+	localNow := now.In(wechat.ShanghaiLoc())
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 30, 0, 0, wechat.ShanghaiLoc())
+	end := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 18, 30, 0, 0, wechat.ShanghaiLoc())
+	if localNow.Before(start) {
+		return start
+	}
+	steps := int(localNow.Sub(start)/interval) + 1
+	next := start.Add(time.Duration(steps) * interval)
+	if next.After(end) {
+		return start.AddDate(0, 0, 1)
+	}
+	return next
+}
+
+func remainingLayoutPollsToday(now time.Time, interval time.Duration) int {
+	if interval <= 0 {
+		return 0
+	}
+	localNow := now.In(wechat.ShanghaiLoc())
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 30, 0, 0, wechat.ShanghaiLoc())
+	end := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 18, 30, 0, 0, wechat.ShanghaiLoc())
+	first := start
+	if !localNow.Before(start) {
+		steps := int(localNow.Sub(start)/interval) + 1
+		first = start.Add(time.Duration(steps) * interval)
+	}
+	if first.After(end) {
+		return 0
+	}
+	return int(end.Sub(first)/interval) + 1
 }
 
 // PollLayout 串行执行一次轻量官方发布轮询和 outbox 投递。与完整日采集共用

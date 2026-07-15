@@ -174,6 +174,47 @@ func TestContentCollectorFetchesEveryPublishedDetailNewestToOldest(t *testing.T)
 	}
 }
 
+func TestContentBackfillDoesNotPollRecentDraftOrPublishedPages(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client := &fakeContentClient{}
+	collector := &ContentCollector{Client: client, Store: store, MaxCalls: 2}
+	if _, err := collector.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client.calls = nil
+	collector.MaxCalls = 10
+	if _, err := collector.RunBackfill(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if containsString(client.calls, "draft_batchget") || containsString(client.calls, "freepublish_batchget") {
+		t.Fatalf("workday outside backfill must not poll recent pages: calls=%v", client.calls)
+	}
+	if !containsString(client.calls, "freepublish_getarticle") {
+		t.Fatalf("historical detail backfill did not continue: calls=%v", client.calls)
+	}
+}
+
+func TestContentBackfillWithNoInventoryWaitsForWorkdayMonitor(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client := &fakeContentClient{}
+	collector := &ContentCollector{Client: client, Store: store, MaxCalls: 10}
+	result, err := collector.RunBackfill(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Calls != 0 || len(client.calls) != 0 {
+		t.Fatalf("outside-window backfill must not initialize from latest pages: result=%+v calls=%v", result, client.calls)
+	}
+}
+
 func TestSplitMessageID(t *testing.T) {
 	msgDataID, index, ok := splitMessageID("2247490098_2")
 	if !ok || msgDataID != "2247490098" || index != 1 {

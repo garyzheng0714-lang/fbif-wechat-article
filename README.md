@@ -23,7 +23,7 @@
 - 自动内容归档只遍历 `freepublish/batchget` 已发布文章，并逐篇调用 `freepublish/getarticle` 保存详情接口全部字段；草稿最新页只用于读取 `article_type`，素材库不参与历史同步。
 - 所有响应先按原始字节写入 SQLite，再生成可查询的文章指标行；微信新增字段无需改结构即可留存。
 - 每天 `00:05` 在上海时区额度刷新后立即抓昨天及最近 30 天仍会变化的数据，再在保留每日 2% 官方额度后，从新到旧断点回填。
-- 可每 `15` 分钟先轮询官方 `draft/batchget` 保留文章类型，再轮询 `freepublish/batchget`：只有官方确认为普通图文 `article_type=news` 的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
+- 每天北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟先轮询官方 `draft/batchget` 保留文章类型，再轮询 `freepublish/batchget`；区间外不轮询新文章。只有官方确认为普通图文 `article_type=news` 的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
 - 已发布文章、文章指标、粉丝指标、评论和同步状态先完整落 SQLite；Base 同步显式开启后再批量增量写入。
 - 官方 API 采集器启动后自动执行一次，此后每天 `00:05` 再次执行；旧直连飞书 scheduler 已停用。
 - 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
@@ -144,7 +144,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `LAYOUT_OFFICIAL_SYNC_URL`，排版服务的 `/api/publish/official-sync` 完整地址
 - `LAYOUT_ADMIN_PASSWORD`，排版服务管理密码
 - `LAYOUT_SOURCE_NAME`，默认 `FBIF食品饮料创新`
-- `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`，默认 `15`
+- `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`，默认 `15`；只在北京时间 `08:30` 至 `18:30`（含首尾）生效
 - `AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN`，默认 `20`
 
 常用可选项：
@@ -236,7 +236,7 @@ X-API-Key: <token>
 ### 自动排版
 
 - 第一次启用时，库内已有 `freepublish` 文章只登记为历史基线，不会批量创建旧稿。
-- 此后每 `15` 分钟先刷新 `draft/batchget` 最新页的 `article_type`，再刷新 `freepublish/batchget` 最新页；多图文中的每篇文章独立去重和投递。
+- 此后仅在北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟刷新 `draft/batchget` 最新页的 `article_type`，再刷新 `freepublish/batchget` 最新页；区间外不轮询新文章，多图文中的每篇文章独立去重和投递。
 - `article_type=news` 才允许进网站；`newspic` 只记录跳过；已发布接口未返回类型且无法与官方草稿快照严格匹配时，服务健康状态报警且绝不自动投递。
 - `freepublish` 历史分页在详情和评论之前获得专用预算，避免每日调用上限导致历史永久无法回填。
 - 标题、作者、正文 HTML、封面和文章 URL 全部取自官方响应；只有链接、没有官方正文的数据分析记录不会进入排版。

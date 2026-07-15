@@ -63,6 +63,15 @@ func contentStreamByName(name string) (contentStream, bool) {
 }
 
 func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
+	return c.run(ctx, true)
+}
+
+// RunBackfill 只推进已发布对象历史分页、详情和评论，不轮询最新草稿与发布页。
+func (c *ContentCollector) RunBackfill(ctx context.Context) (*ContentRunResult, error) {
+	return c.run(ctx, false)
+}
+
+func (c *ContentCollector) run(ctx context.Context, refreshRecent bool) (*ContentRunResult, error) {
 	if c.Client == nil || c.Store == nil {
 		return nil, fmt.Errorf("content collector is not configured")
 	}
@@ -89,46 +98,48 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 	// Only the latest draft page is retained for the official news/newspic type.
 	// The durable inventory itself is freepublish: media-library inventories and
 	// historical drafts are outside the published-article archive scope.
-	var latestPublishedPage archive.ContentPageInfo
-	for _, stream := range recentStreams {
-		if result.Calls >= maxCalls {
-			break
-		}
-		info, err := c.fetchPage(ctx, stream, 0, false)
-		result.Calls++
-		if err != nil {
-			result.Failed++
-			failed[stream.Name] = true
-			result.Errors[stream.Name] = err.Error()
-			runErrors = append(runErrors, err)
-			if isQuotaError(err) {
+	if refreshRecent {
+		var latestPublishedPage archive.ContentPageInfo
+		for _, stream := range recentStreams {
+			if result.Calls >= maxCalls {
 				break
 			}
-			continue
-		}
-		result.Succeeded++
-		if stream.Name == publishedStream.Name {
-			latestPublishedPage = info
-		}
-	}
-
-	// 首次运行已拿到最新一页，直接把游标放到下一页，避免重复消耗一次额度。
-	if !failed[publishedStream.Name] {
-		state, err := c.Store.GetContentState(ctx, publishedStream.Name)
-		if err != nil {
-			failed[publishedStream.Name] = true
-			result.Errors["freepublish_history"] = err.Error()
-			runErrors = append(runErrors, err)
-		} else if state == nil {
-			nextOffset := latestPublishedPage.ItemCount
-			if nextOffset == 0 {
-				nextOffset = len(latestPublishedPage.ObjectIDs)
+			info, err := c.fetchPage(ctx, stream, 0, false)
+			result.Calls++
+			if err != nil {
+				result.Failed++
+				failed[stream.Name] = true
+				result.Errors[stream.Name] = err.Error()
+				runErrors = append(runErrors, err)
+				if isQuotaError(err) {
+					break
+				}
+				continue
 			}
-			complete := nextOffset == 0 || nextOffset >= latestPublishedPage.ObjectTotalCount
-			if err := c.Store.MarkContentPageSuccess(ctx, publishedStream.Name, nextOffset, latestPublishedPage.ObjectTotalCount, complete, c.now()); err != nil {
+			result.Succeeded++
+			if stream.Name == publishedStream.Name {
+				latestPublishedPage = info
+			}
+		}
+
+		// 首次运行已拿到最新一页，直接把游标放到下一页，避免重复消耗一次额度。
+		if !failed[publishedStream.Name] {
+			state, err := c.Store.GetContentState(ctx, publishedStream.Name)
+			if err != nil {
 				failed[publishedStream.Name] = true
 				result.Errors["freepublish_history"] = err.Error()
 				runErrors = append(runErrors, err)
+			} else if state == nil {
+				nextOffset := latestPublishedPage.ItemCount
+				if nextOffset == 0 {
+					nextOffset = len(latestPublishedPage.ObjectIDs)
+				}
+				complete := nextOffset == 0 || nextOffset >= latestPublishedPage.ObjectTotalCount
+				if err := c.Store.MarkContentPageSuccess(ctx, publishedStream.Name, nextOffset, latestPublishedPage.ObjectTotalCount, complete, c.now()); err != nil {
+					failed[publishedStream.Name] = true
+					result.Errors["freepublish_history"] = err.Error()
+					runErrors = append(runErrors, err)
+				}
 			}
 		}
 	}
@@ -143,6 +154,9 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 			break
 		}
 		if state != nil && state.ObjectInventoryComplete {
+			break
+		}
+		if state == nil && !refreshRecent {
 			break
 		}
 		offset := 0

@@ -18,6 +18,7 @@ type LayoutCandidate struct {
 	SourceKey   string
 	SourceURL   string
 	Title       string
+	ArticleType string
 	SourceName  string
 	Author      string
 	ContentHTML string
@@ -33,20 +34,39 @@ type LayoutDelivery struct {
 }
 
 type LayoutOutboxStats struct {
-	InitializedAt int64  `json:"initializedAt"`
-	Baseline      int64  `json:"baseline"`
-	Pending       int64  `json:"pending"`
-	Failed        int64  `json:"failed"`
-	Delivered     int64  `json:"delivered"`
-	LastError     string `json:"lastError,omitempty"`
+	InitializedAt    int64  `json:"initializedAt"`
+	Baseline         int64  `json:"baseline"`
+	Pending          int64  `json:"pending"`
+	Failed           int64  `json:"failed"`
+	Delivered        int64  `json:"delivered"`
+	SkippedNewspic   int64  `json:"skippedNewspic"`
+	HeldUnclassified int64  `json:"heldUnclassified"`
+	LastError        string `json:"lastError,omitempty"`
 }
 
 // ListOfficialPublishedArticles 只返回微信官方 freepublish 接口已经给出完整正文的文章。
 // 数据分析接口只有链接和指标，没有正文，不能冒充成可自动排版的官方正文来源。
 func (s *Store) ListOfficialPublishedArticles(ctx context.Context) ([]LayoutCandidate, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT a.object_id, a.article_index, a.title, a.author, a.content_html,
-			a.url, a.thumb_url, o.update_time
+		SELECT a.object_id, a.article_index, a.title,
+			COALESCE((
+				SELECT CASE
+					WHEN COUNT(*) = 0 THEN ''
+					WHEN COUNT(DISTINCT d.article_type) = 1 THEN MIN(d.article_type)
+					ELSE ''
+				END
+				FROM official_content_articles AS d
+				WHERE d.source = 'draft'
+					AND d.article_type <> ''
+					AND d.article_index = a.article_index
+					AND d.title = a.title
+					AND d.author = a.author
+					AND d.content_html = a.content_html
+					AND d.content_source_url = a.content_source_url
+					AND d.thumb_media_id = a.thumb_media_id
+					AND d.thumb_url = a.thumb_url
+			), '') AS article_type,
+			a.author, a.content_html, a.url, a.thumb_url, o.update_time
 		FROM official_content_articles AS a
 		JOIN official_content_objects AS o
 			ON o.source = a.source AND o.object_id = a.object_id
@@ -65,6 +85,7 @@ func (s *Store) ListOfficialPublishedArticles(ctx context.Context) ([]LayoutCand
 			&objectID,
 			&articleIndex,
 			&candidate.Title,
+			&candidate.ArticleType,
 			&candidate.Author,
 			&candidate.ContentHTML,
 			&candidate.SourceURL,
@@ -262,5 +283,43 @@ func (s *Store) LayoutStats(ctx context.Context) (LayoutOutboxStats, error) {
 		SELECT last_error FROM official_layout_outbox
 		WHERE status = ? AND last_error <> ''
 		ORDER BY updated_at DESC LIMIT 1`, LayoutStatusFailed).Scan(&stats.LastError)
+	if stats.InitializedAt > 0 {
+		if err := s.db.QueryRowContext(ctx, `
+			WITH classified AS (
+				SELECT o.update_time,
+					COALESCE((
+						SELECT CASE
+							WHEN COUNT(*) = 0 THEN ''
+							WHEN COUNT(DISTINCT d.article_type) = 1 THEN MIN(d.article_type)
+							ELSE ''
+						END
+						FROM official_content_articles AS d
+						WHERE d.source = 'draft'
+							AND d.article_type <> ''
+							AND d.article_index = a.article_index
+							AND d.title = a.title
+							AND d.author = a.author
+							AND d.content_html = a.content_html
+							AND d.content_source_url = a.content_source_url
+							AND d.thumb_media_id = a.thumb_media_id
+							AND d.thumb_url = a.thumb_url
+					), '') AS article_type
+				FROM official_content_articles AS a
+				JOIN official_content_objects AS o
+					ON o.source = a.source AND o.object_id = a.object_id
+				WHERE a.source = 'freepublish'
+					AND a.url <> '' AND a.content_html <> '' AND a.is_deleted = 0
+			)
+			SELECT
+				COALESCE(SUM(article_type = 'newspic'), 0),
+				COALESCE(SUM(article_type NOT IN ('news', 'newspic')), 0)
+			FROM classified
+			WHERE update_time >= ?`, stats.InitializedAt/1000).Scan(
+			&stats.SkippedNewspic,
+			&stats.HeldUnclassified,
+		); err != nil {
+			return stats, err
+		}
+	}
 	return stats, nil
 }

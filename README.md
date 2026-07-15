@@ -21,7 +21,7 @@
 - 覆盖素材、草稿、发表记录、文章详情、评论、群发/发布状态等 11 个内容侧读取接口；需要 `publish_id` 或 `msg_id` 的状态接口通过受保护的手动调用入口执行。
 - 所有响应先按原始字节写入 SQLite，再生成可查询的文章指标行；微信新增字段无需改结构即可留存。
 - 每天 `08:30` 先抓昨天及最近 30 天仍会变化的数据，再用剩余配额从官方最早可用日期断点回填。
-- 可每 `15` 分钟轮询官方 `freepublish/batchget`：新文章正文经持久化 outbox 投递给排版服务，直接进入 `ft-default` 排版和待审核草稿；不回源抓网页，也不会自动公开。
+- 可每 `15` 分钟先轮询官方 `draft/batchget` 保留文章类型，再轮询 `freepublish/batchget`：只有官方确认为普通图文 `article_type=news` 的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
 - 将文章元数据、正文内容、封面信息和同步状态写入飞书多维表格。
 - 启动后自动执行一次同步，并由内置 scheduler 每天 `09:00` 再次同步。
 - 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
@@ -205,13 +205,17 @@ X-API-Key: <token>
 - 服务启动后自动采集一次，此后每天北京时间 `08:30` 执行。
 - 15 个现役数据接口必须全部成功，`/health` 才返回 `200`；缺密钥、白名单、权限或接口错误均返回 `503`。
 - `getarticletotaldetail` 会重复刷新最近 30 个发表日；其他接口按官方最大跨度拆分并断点回填。
+- 正文、身份与指标分表保存：`official_content_articles` 保存发布正文；`official_article_publications` 用 `msgid=msg_data_id_index` 保存文章身份；`official_article_metric_facts` 关联阅读、分享、阅读后关注等文章事实；`official_follower_metric_facts` 保存账号新增、取关、净增和累计粉丝。`official_article_catalog` 通过官方 `content_url` 关联正文，`official_article_latest_performance` 提供每篇文章最新累计表现。
+- 官方窗口限制按接口独立执行：`freepublish/batchget` 每页 1–20 个发布对象；新版文章阅读、分享、发表详情从 `2025-11-01` 起提供且查询结束日最多为昨日，其中阅读/分享每次 1 天、发表详情每篇只统计发表后 30 天；用户增减与累计数据从 `2014-12-01` 起提供，用户增减按来源记录，账号净增不得直接归因给单篇文章。
 - 每次请求和响应都留档。相同请求得到完全相同的响应时，后续记录引用第一份原始字节，避免重复正文写满磁盘。
 - 可用 `./wechat-sync collect-once` 做一次性采集和服务器验收。
 
 ### 自动排版
 
 - 第一次启用时，库内已有 `freepublish` 文章只登记为历史基线，不会批量创建旧稿。
-- 此后每 `15` 分钟仅调用微信官方 `freepublish/batchget` 最新页；多图文中的每篇文章独立去重和投递。
+- 此后每 `15` 分钟先刷新 `draft/batchget` 最新页的 `article_type`，再刷新 `freepublish/batchget` 最新页；多图文中的每篇文章独立去重和投递。
+- `article_type=news` 才允许进网站；`newspic` 只记录跳过；已发布接口未返回类型且无法与官方草稿快照严格匹配时，服务健康状态报警且绝不自动投递。
+- `freepublish` 历史分页在详情和评论之前获得专用预算，避免每日调用上限导致历史永久无法回填。
 - 标题、作者、正文 HTML、封面和文章 URL 全部取自官方响应；只有链接、没有官方正文的数据分析记录不会进入排版。
 - outbox 在 SQLite 中持久化，网络失败或服务重启后继续重试；公众号 URL 的 `sn/chksm/scene` 变化不会造成重复稿。
 - 排版服务自动流程只到 `awaiting_review`，不会代替人工批准，也不会自动公开到 FoodTalks。

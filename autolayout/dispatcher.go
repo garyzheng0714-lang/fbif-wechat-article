@@ -96,13 +96,15 @@ type Dispatcher struct {
 }
 
 type RunResult struct {
-	Bootstrapped bool              `json:"bootstrapped"`
-	Baselined    int               `json:"baselined"`
-	Discovered   int               `json:"discovered"`
-	Attempted    int               `json:"attempted"`
-	Delivered    int               `json:"delivered"`
-	Failed       int               `json:"failed"`
-	Errors       map[string]string `json:"errors,omitempty"`
+	Bootstrapped     bool              `json:"bootstrapped"`
+	Baselined        int               `json:"baselined"`
+	Discovered       int               `json:"discovered"`
+	SkippedNewspic   int               `json:"skippedNewspic"`
+	HeldUnclassified int               `json:"heldUnclassified"`
+	Attempted        int               `json:"attempted"`
+	Delivered        int               `json:"delivered"`
+	Failed           int               `json:"failed"`
+	Errors           map[string]string `json:"errors,omitempty"`
 }
 
 type Status struct {
@@ -159,10 +161,12 @@ func (d *Dispatcher) Sync(ctx context.Context) (*RunResult, error) {
 	if stats.InitializedAt > 0 {
 		notBefore = stats.InitializedAt / 1000
 	}
-	candidates, err := d.candidates(ctx, notBefore)
+	candidates, skippedNewspic, heldUnclassified, err := d.candidates(ctx, notBefore)
 	if err != nil {
 		return result, err
 	}
+	result.SkippedNewspic = skippedNewspic
+	result.HeldUnclassified = heldUnclassified
 	initialized, baselined, err := d.Store.InitializeLayoutOutbox(ctx, candidates, now)
 	if err != nil {
 		return result, err
@@ -224,25 +228,39 @@ func (d *Dispatcher) Status(ctx context.Context) (*Status, error) {
 		return nil, err
 	}
 	status := &Status{Enabled: true, Outbox: stats}
-	status.Ready = stats.InitializedAt > 0 && stats.Failed == 0
+	status.Ready = stats.InitializedAt > 0 && stats.Failed == 0 && stats.HeldUnclassified == 0
 	if stats.InitializedAt == 0 {
 		status.Reason = "自动排版尚未完成首次历史基线初始化"
 	} else if stats.Failed > 0 {
 		status.Reason = "存在自动排版投递失败，服务会按持久化 outbox 重试"
+	} else if stats.HeldUnclassified > 0 {
+		status.Reason = "存在无法由官方草稿类型确认的已发布内容；为防止小绿书误投，已暂停自动排版"
 	}
 	return status, nil
 }
 
-func (d *Dispatcher) candidates(ctx context.Context, notBefore int64) ([]archive.LayoutCandidate, error) {
+func (d *Dispatcher) candidates(ctx context.Context, notBefore int64) ([]archive.LayoutCandidate, int, int, error) {
 	candidates, err := d.Store.ListOfficialPublishedArticles(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	byKey := make(map[string]archive.LayoutCandidate, len(candidates))
+	skippedNewspic := 0
+	heldUnclassified := 0
 	for _, candidate := range candidates {
 		// freepublish 历史分页会在启用后继续回填；以官方 update_time 而不是
 		// first_seen_at 判断新旧，杜绝把刚补入数据库的旧文章当成新文章排版。
 		if notBefore > 0 && (candidate.PublishedAt == 0 || candidate.PublishedAt < notBefore) {
+			continue
+		}
+		switch candidate.ArticleType {
+		case "news":
+			// Only the official ordinary-article type is eligible for website layout.
+		case "newspic":
+			skippedNewspic++
+			continue
+		default:
+			heldUnclassified++
 			continue
 		}
 		key, err := CanonicalSourceKey(candidate.SourceURL)
@@ -257,7 +275,7 @@ func (d *Dispatcher) candidates(ctx context.Context, notBefore int64) ([]archive
 	for _, candidate := range byKey {
 		result = append(result, candidate)
 	}
-	return result, nil
+	return result, skippedNewspic, heldUnclassified, nil
 }
 
 // CanonicalSourceKey 与排版服务 normalizeSiteSourceKey 保持同一身份算法：长链只保留

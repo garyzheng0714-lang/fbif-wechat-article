@@ -18,6 +18,11 @@ type fakeLayoutAPI struct {
 	failNext bool
 }
 
+const (
+	testOfficialContent = "<p>官方正文</p><img src=\"https://mmbiz.qpic.cn/body.jpg\">"
+	testOfficialCover   = "https://mmbiz.qpic.cn/cover.jpg"
+)
+
 func (f *fakeLayoutAPI) SubmitOfficial(_ context.Context, article Article) (Receipt, error) {
 	f.articles = append(f.articles, article)
 	if f.failNext {
@@ -39,9 +44,9 @@ func savePublishedArticle(t *testing.T, store *archive.Store, articleID, title, 
 				"news_item": []interface{}{map[string]interface{}{
 					"title":     title,
 					"author":    "作者",
-					"content":   "<p>官方正文</p><img src=\"https://mmbiz.qpic.cn/body.jpg\">",
+					"content":   testOfficialContent,
 					"url":       articleURL,
-					"thumb_url": "https://mmbiz.qpic.cn/cover.jpg",
+					"thumb_url": testOfficialCover,
 				}},
 			},
 		}},
@@ -54,6 +59,34 @@ func savePublishedArticle(t *testing.T, store *archive.Store, articleID, title, 
 	}
 }
 
+func saveDraftArticle(t *testing.T, store *archive.Store, mediaID, title, articleType string, now time.Time) {
+	t.Helper()
+	body, err := json.Marshal(map[string]interface{}{
+		"total_count": 1,
+		"item_count":  1,
+		"item": []interface{}{map[string]interface{}{
+			"media_id":    mediaID,
+			"update_time": now.Unix(),
+			"content": map[string]interface{}{
+				"news_item": []interface{}{map[string]interface{}{
+					"article_type": articleType,
+					"title":        title,
+					"author":       "作者",
+					"content":      testOfficialContent,
+					"url":          "https://mp.weixin.qq.com/s/draft-preview",
+					"thumb_url":    testOfficialCover,
+				}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal official draft page: %v", err)
+	}
+	if _, err := store.SaveContentPage(context.Background(), "draft", body, now); err != nil {
+		t.Fatalf("save official draft page: %v", err)
+	}
+}
+
 func TestDispatcherBaselinesExistingAndDeliversOnlyNewOfficialContent(t *testing.T) {
 	store, err := archive.Open(t.TempDir() + "/archive.db")
 	if err != nil {
@@ -61,6 +94,7 @@ func TestDispatcherBaselinesExistingAndDeliversOnlyNewOfficialContent(t *testing
 	}
 	defer store.Close()
 	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	saveDraftArticle(t, store, "draft-old", "历史文章", "news", now.Add(-time.Hour))
 	savePublishedArticle(t, store, "old", "历史文章", "http://mp.weixin.qq.com/s?__biz=MzA3&mid=1&idx=1&sn=old", now.Add(-time.Hour))
 	fake := &fakeLayoutAPI{}
 	dispatcher := &Dispatcher{
@@ -77,6 +111,7 @@ func TestDispatcherBaselinesExistingAndDeliversOnlyNewOfficialContent(t *testing
 	}
 
 	newURL := "http://mp.weixin.qq.com/s?sn=new&idx=1&mid=2&__biz=MzA3&chksm=x"
+	saveDraftArticle(t, store, "draft-new", "新文章", "news", now.Add(time.Minute))
 	savePublishedArticle(t, store, "new", "新文章", newURL, now.Add(time.Minute))
 	second, err := dispatcher.Sync(context.Background())
 	if err != nil {
@@ -91,6 +126,7 @@ func TestDispatcherBaselinesExistingAndDeliversOnlyNewOfficialContent(t *testing
 	}
 	// 历史分页可能在启用后才补入数据库；必须按官方 update_time 过滤，不能按
 	// first_seen_at 把旧文章误当新文章。
+	saveDraftArticle(t, store, "draft-backfill", "历史补采", "news", now.Add(-24*time.Hour))
 	savePublishedArticle(t, store, "backfill", "历史补采", "https://mp.weixin.qq.com/s/backfill", now.Add(-24*time.Hour))
 	third, err := dispatcher.Sync(context.Background())
 	if err != nil {
@@ -120,6 +156,7 @@ func TestDispatcherRetriesPersistedFailure(t *testing.T) {
 	if _, err := dispatcher.Sync(context.Background()); err != nil {
 		t.Fatalf("empty bootstrap: %v", err)
 	}
+	saveDraftArticle(t, store, "draft-retry", "重试文章", "news", now)
 	savePublishedArticle(t, store, "retry", "重试文章", "https://mp.weixin.qq.com/s/retry", now)
 	failed, err := dispatcher.Sync(context.Background())
 	if err == nil || failed.Failed != 1 {
@@ -138,6 +175,56 @@ func TestDispatcherRetriesPersistedFailure(t *testing.T) {
 	stats, _ = store.LayoutStats(context.Background())
 	if stats.Failed != 0 || stats.Delivered != 1 {
 		t.Fatalf("成功后应清除失败态：%+v", stats)
+	}
+}
+
+func TestDispatcherSkipsNewspicAndHoldsUnclassified(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	fake := &fakeLayoutAPI{}
+	dispatcher := &Dispatcher{Store: store, Client: fake, MaxDeliveries: 20, Now: func() time.Time { return now }}
+	if _, err := dispatcher.Sync(context.Background()); err != nil {
+		t.Fatalf("empty bootstrap: %v", err)
+	}
+
+	saveDraftArticle(t, store, "draft-newspic", "小绿书", "newspic", now.Add(time.Minute))
+	savePublishedArticle(t, store, "published-newspic", "小绿书", "https://mp.weixin.qq.com/s/newspic", now.Add(time.Minute))
+	skipped, err := dispatcher.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("skip newspic: %v", err)
+	}
+	if skipped.SkippedNewspic != 1 || skipped.HeldUnclassified != 0 || skipped.Discovered != 0 || len(fake.articles) != 0 {
+		t.Fatalf("newspic 必须只记录跳过、不得投递：result=%+v calls=%d", skipped, len(fake.articles))
+	}
+	status, err := dispatcher.Status(context.Background())
+	if err != nil || !status.Ready || status.Outbox.SkippedNewspic != 1 {
+		t.Fatalf("已识别 newspic 不应让服务不健康：status=%+v err=%v", status, err)
+	}
+
+	savePublishedArticle(t, store, "published-unknown", "类型未知", "https://mp.weixin.qq.com/s/unknown", now.Add(2*time.Minute))
+	held, err := dispatcher.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("hold unknown: %v", err)
+	}
+	if held.HeldUnclassified != 1 || held.Discovered != 0 || len(fake.articles) != 0 {
+		t.Fatalf("无官方类型快照时必须 fail closed：result=%+v calls=%d", held, len(fake.articles))
+	}
+	status, err = dispatcher.Status(context.Background())
+	if err != nil || status.Ready || status.Outbox.HeldUnclassified != 1 {
+		t.Fatalf("未分类已发布内容必须进健康告警：status=%+v err=%v", status, err)
+	}
+
+	saveDraftArticle(t, store, "draft-unknown", "类型未知", "news", now.Add(3*time.Minute))
+	released, err := dispatcher.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("release confirmed news: %v", err)
+	}
+	if released.HeldUnclassified != 0 || released.Discovered != 1 || released.Delivered != 1 || len(fake.articles) != 1 {
+		t.Fatalf("官方确认 news 后应恢复投递：result=%+v calls=%d", released, len(fake.articles))
 	}
 }
 

@@ -57,6 +57,87 @@ func TestSaveFetchPreservesRawAndNormalizesArticleMetrics(t *testing.T) {
 	}
 }
 
+func TestOfficialArticleAndFollowerViewsJoinOfficialTables(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	fetchedAt := time.Unix(100, 0)
+	articleURL := "http://mp.weixin.qq.com/s?mid=42&idx=2"
+	metricResponse := []byte(`{"list":[{"ref_date":"2026-07-01","msgid":"42_2","publish_type":1,"title":"测试文章","content_url":"` + articleURL + `","detail_list":[{"stat_date":"2026-07-02","read_user":123,"share_user":9,"read_subscribe_user":5}]}]}`)
+	if _, err := store.SaveFetch(context.Background(), FetchRecord{
+		Endpoint:     "getarticletotaldetail",
+		Category:     "article",
+		BeginDate:    "2026-07-01",
+		EndDate:      "2026-07-01",
+		ResponseJSON: metricResponse,
+		Success:      true,
+		FetchedAt:    fetchedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	contentResponse := []byte(`{"total_count":1,"item_count":1,"item":[{"article_id":"article-42","update_time":100,"content":{"news_item":[{"title":"测试文章","author":"作者","content":"<p>正文</p>","url":"` + articleURL + `"}]}}]}`)
+	if _, err := store.SaveContentPage(context.Background(), "freepublish", contentResponse, fetchedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, response := range []struct {
+		endpoint string
+		body     []byte
+	}{
+		{"getusersummary", []byte(`{"list":[{"ref_date":"2026-07-02","user_source":57,"new_user":12,"cancel_user":3}]}`)},
+		{"getusercumulate", []byte(`{"list":[{"ref_date":"2026-07-02","cumulate_user":1000}]}`)},
+	} {
+		if _, err := store.SaveFetch(context.Background(), FetchRecord{
+			Endpoint:     response.endpoint,
+			Category:     "user",
+			BeginDate:    "2026-07-02",
+			EndDate:      "2026-07-02",
+			ResponseJSON: response.body,
+			Success:      true,
+			FetchedAt:    fetchedAt,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var msgDataID, articleID string
+	var articleIndex int
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT msg_data_id, article_index, article_id
+		FROM official_article_catalog WHERE msgid = '42_2'`).Scan(&msgDataID, &articleIndex, &articleID); err != nil {
+		t.Fatal(err)
+	}
+	if msgDataID != "42" || articleIndex != 2 || articleID != "article-42" {
+		t.Fatalf("catalog identity = %q/%d/%q", msgDataID, articleIndex, articleID)
+	}
+
+	var readUser, readSubscribeUser int
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT CAST(read_user AS INTEGER), CAST(read_subscribe_user AS INTEGER)
+		FROM official_article_latest_performance WHERE msgid = '42_2'`).Scan(&readUser, &readSubscribeUser); err != nil {
+		t.Fatal(err)
+	}
+	if readUser != 123 || readSubscribeUser != 5 {
+		t.Fatalf("article metrics read=%d subscribe=%d", readUser, readSubscribeUser)
+	}
+
+	var netNew, cumulate int
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT
+			MAX(COALESCE(net_new_user, 0)),
+			MAX(COALESCE(cumulate_user, 0))
+		FROM official_follower_metric_facts`).Scan(&netNew, &cumulate); err != nil {
+		t.Fatal(err)
+	}
+	if netNew != 9 || cumulate != 1000 {
+		t.Fatalf("follower metrics net=%d cumulate=%d", netNew, cumulate)
+	}
+}
+
 func TestSaveFetchKeepsEveryRevision(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {
@@ -156,5 +237,26 @@ func TestSaveContentPagePreservesObjectsAndFullArticleFields(t *testing.T) {
 	unknown, _ := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE json_extract(raw_json, '$.unknown_new_field.keep') = 1`)
 	if objects != 1 || articles != 1 || unknown != 1 {
 		t.Fatalf("objects=%d articles=%d unknown=%d", objects, articles, unknown)
+	}
+}
+
+func TestDraftArticleTypeSurvivesDetailResponseWithoutType(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(100, 0)
+	page := []byte(`{"total_count":1,"item_count":1,"item":[{"media_id":"draft-1","update_time":100,"content":{"news_item":[{"article_type":"newspic","title":"小绿书","content":"纯文本","thumb_url":"https://mmbiz.qpic.cn/cover.jpg"}]}}]}`)
+	if _, err := store.SaveContentPage(context.Background(), "draft", page, now); err != nil {
+		t.Fatal(err)
+	}
+	detail := []byte(`{"news_item":[{"title":"小绿书","content":"纯文本","thumb_url":"https://mmbiz.qpic.cn/cover.jpg"}]}`)
+	if err := store.SaveContentDetail(context.Background(), "draft", "draft-1", detail, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	typed, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'draft' AND article_type = 'newspic'`)
+	if err != nil || typed != 1 {
+		t.Fatalf("newspic type must survive detail response without article_type: typed=%d err=%v", typed, err)
 	}
 }

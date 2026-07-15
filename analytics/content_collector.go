@@ -65,6 +65,17 @@ var contentStreams = []contentStream{
 	}},
 }
 
+const publishedHistoryPagesPerRun = 20
+
+func contentStreamByName(name string) (contentStream, bool) {
+	for _, stream := range contentStreams {
+		if stream.Name == name {
+			return stream, true
+		}
+	}
+	return contentStream{}, false
+}
+
 func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 	if c.Client == nil || c.Store == nil {
 		return nil, fmt.Errorf("content collector is not configured")
@@ -120,6 +131,40 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 		}
 		result.Succeeded++
 		recentObjects[stream.Name] = info.ObjectIDs
+	}
+
+	// freepublish 是已发布正文归档与自动排版的权威来源，必须在详情、评论等
+	// 可耗尽预算的接口之前获得固定分页机会。接口每页最多 20 个对象，20 页
+	// 足够覆盖当前数百篇历史；批量响应已含完整正文，无需为历史页逐篇调用详情接口。
+	publishedStream, hasPublishedStream := contentStreamByName("freepublish")
+	for pages := 0; hasPublishedStream && pages < publishedHistoryPagesPerRun && result.Calls < maxCalls && !failed["freepublish"]; pages++ {
+		state, err := c.Store.GetContentState(ctx, "freepublish")
+		if err != nil {
+			failed["freepublish"] = true
+			result.Errors["freepublish_history"] = err.Error()
+			runErrors = append(runErrors, err)
+			break
+		}
+		if state != nil && state.Complete {
+			break
+		}
+		offset := 0
+		if state != nil {
+			offset = state.NextOffset
+		}
+		_, err = c.fetchPage(ctx, publishedStream, offset, true)
+		result.Calls++
+		if err != nil {
+			result.Failed++
+			failed["freepublish"] = true
+			result.Errors["freepublish_history"] = err.Error()
+			runErrors = append(runErrors, err)
+			if isQuotaError(err) {
+				break
+			}
+			continue
+		}
+		result.Succeeded++
 	}
 
 	// Fetch full detail for recent article-bearing objects. Batch responses are
@@ -363,19 +408,24 @@ func (c *ContentCollector) CallAndArchive(ctx context.Context, endpointName stri
 	return c.callAndArchiveResponse(ctx, endpointName, payload, "", "")
 }
 
-// RefreshPublished 供 15 分钟自动排版轮询使用：只刷新 freepublish 最新一页，
-// 仍经官方 API、原始响应归档和内容表落库，不启动历史回填。
+// RefreshPublished 供 15 分钟自动排版轮询使用：必须先刷新 draft
+// 最新一页，保留 article_type=news|newspic 的官方分类快照，再刷新
+// freepublish 最新一页。任一步仍经官方 API、原始响应归档和内容表落库，
+// 不启动历史回填；draft 刷新失败时 fail closed，不拉取新的已发布候选。
 func (c *ContentCollector) RefreshPublished(ctx context.Context) (archive.ContentPageInfo, error) {
 	if !c.runMu.TryLock() {
 		return archive.ContentPageInfo{}, fmt.Errorf("content collector is already running")
 	}
 	defer c.runMu.Unlock()
-	for _, stream := range contentStreams {
-		if stream.Name == "freepublish" {
-			return c.fetchPage(ctx, stream, 0, false)
-		}
+	draftStream, hasDraftStream := contentStreamByName("draft")
+	publishedStream, hasPublishedStream := contentStreamByName("freepublish")
+	if !hasDraftStream || !hasPublishedStream {
+		return archive.ContentPageInfo{}, fmt.Errorf("draft/freepublish content streams are not configured")
 	}
-	return archive.ContentPageInfo{}, fmt.Errorf("freepublish content stream is not configured")
+	if _, err := c.fetchPage(ctx, draftStream, 0, false); err != nil {
+		return archive.ContentPageInfo{}, fmt.Errorf("refresh official draft types: %w", err)
+	}
+	return c.fetchPage(ctx, publishedStream, 0, false)
 }
 
 func (c *ContentCollector) now() time.Time {

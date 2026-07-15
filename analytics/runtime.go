@@ -184,13 +184,13 @@ func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {
 	interval := time.Duration(envInt("AUTO_LAYOUT_POLL_INTERVAL_MINUTES", 15)) * time.Minute
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	log.Printf("[AutoLayout] Polling official freepublish every %s", interval)
+	log.Printf("[AutoLayout] Polling official draft types + freepublish every %s", interval)
 	for {
 		select {
 		case <-ticker.C:
 			result, err := r.PollLayout(context.Background())
 			if result != nil {
-				log.Printf("[AutoLayout] poll discovered=%d delivered=%d failed=%d", result.Discovered, result.Delivered, result.Failed)
+				log.Printf("[AutoLayout] poll discovered=%d skipped_newspic=%d held_unclassified=%d delivered=%d failed=%d", result.Discovered, result.SkippedNewspic, result.HeldUnclassified, result.Delivered, result.Failed)
 			}
 			if err != nil {
 				log.Printf("[AutoLayout] poll completed with errors: %v", err)

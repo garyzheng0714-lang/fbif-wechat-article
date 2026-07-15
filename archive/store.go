@@ -106,6 +106,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			ON official_api_rows(msgid, ref_date, stat_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_official_api_rows_endpoint_date
 			ON official_api_rows(endpoint, ref_date, stat_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_api_rows_metric_join
+			ON official_api_rows(endpoint, row_scope, msgid, stat_date)`,
 		`CREATE TABLE IF NOT EXISTS official_content_objects (
 			source TEXT NOT NULL,
 			object_id TEXT NOT NULL,
@@ -123,6 +125,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			source TEXT NOT NULL,
 			object_id TEXT NOT NULL,
 			article_index INTEGER NOT NULL,
+			article_type TEXT NOT NULL DEFAULT '',
 			title TEXT NOT NULL DEFAULT '',
 			author TEXT NOT NULL DEFAULT '',
 			digest TEXT NOT NULL DEFAULT '',
@@ -139,6 +142,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_official_content_articles_url
 			ON official_content_articles(url)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_content_articles_type_match
+			ON official_content_articles(source, article_index, title)`,
 		`CREATE TABLE IF NOT EXISTS official_content_state (
 			stream TEXT PRIMARY KEY,
 			next_offset INTEGER NOT NULL DEFAULT 0,
@@ -206,6 +211,142 @@ func (s *Store) migrate(ctx context.Context) error {
 				last_seen_at
 			FROM official_api_rows
 			WHERE endpoint IN ('getarticleread', 'getarticleshare', 'getarticlesummary', 'getarticletotal', 'getarticletotaldetail')`,
+		`CREATE VIEW IF NOT EXISTS official_article_publications AS
+			WITH ranked AS (
+				SELECT
+					msgid,
+					ref_date,
+					title,
+					dimensions_json,
+					raw_json,
+					last_seen_at,
+					ROW_NUMBER() OVER (
+						PARTITION BY msgid ORDER BY last_seen_at DESC
+					) AS recency_rank
+				FROM official_api_rows
+				WHERE endpoint = 'getarticletotaldetail'
+					AND row_scope = 'item'
+					AND msgid <> ''
+			)
+			SELECT
+				msgid,
+				CASE
+					WHEN instr(msgid, '_') > 0 THEN substr(msgid, 1, instr(msgid, '_') - 1)
+					ELSE msgid
+				END AS msg_data_id,
+				CASE
+					WHEN instr(msgid, '_') > 0 THEN CAST(substr(msgid, instr(msgid, '_') + 1) AS INTEGER)
+					ELSE 0
+				END AS article_index,
+				ref_date AS publish_date,
+				CAST(COALESCE(
+					json_extract(dimensions_json, '$.publish_type'),
+					json_extract(raw_json, '$.publish_type')
+				) AS INTEGER) AS publish_type,
+				title,
+				COALESCE(json_extract(raw_json, '$.content_url'), '') AS content_url,
+				last_seen_at
+			FROM ranked
+			WHERE recency_rank = 1`,
+		`CREATE VIEW IF NOT EXISTS official_article_catalog AS
+			WITH ranked_content AS (
+				SELECT
+					*,
+					ROW_NUMBER() OVER (
+						PARTITION BY url ORDER BY last_seen_at DESC, object_id
+					) AS recency_rank
+				FROM official_content_articles
+				WHERE source = 'freepublish' AND url <> ''
+			)
+			SELECT
+				p.msgid,
+				p.msg_data_id,
+				p.article_index,
+				p.publish_date,
+				p.publish_type,
+				p.title,
+				p.content_url,
+				c.object_id AS article_id,
+				c.article_index AS content_article_index,
+				c.author,
+				c.digest,
+				c.content_html,
+				c.content_source_url,
+				c.thumb_media_id,
+				c.thumb_url,
+				c.article_type,
+				c.is_deleted,
+				p.last_seen_at
+			FROM official_article_publications AS p
+			LEFT JOIN ranked_content AS c
+				ON c.url = p.content_url AND c.recency_rank = 1`,
+		`CREATE VIEW IF NOT EXISTS official_article_metric_facts AS
+			SELECT
+				m.endpoint,
+				m.row_scope,
+				m.ref_date,
+				m.stat_date,
+				COALESCE(NULLIF(m.stat_date, ''), m.ref_date) AS metric_date,
+				m.msgid,
+				p.msg_data_id,
+				p.article_index,
+				p.publish_date,
+				COALESCE(NULLIF(m.title, ''), p.title) AS title,
+				p.content_url,
+				p.article_id,
+				p.content_article_index,
+				m.dimensions_json,
+				m.read_user,
+				m.read_count,
+				m.original_read_user,
+				m.original_read_count,
+				m.share_user,
+				m.share_count,
+				m.favorite_user,
+				m.favorite_count,
+				m.zaikan_user,
+				m.like_user,
+				m.comment_count,
+				m.collection_user,
+				m.praise_money,
+				m.read_subscribe_user,
+				m.read_delivery_rate,
+				m.read_finish_rate,
+				m.read_avg_activetime,
+				m.raw_json,
+				m.last_seen_at
+			FROM official_article_metrics AS m
+			LEFT JOIN official_article_catalog AS p ON p.msgid = m.msgid
+			WHERE m.msgid <> ''
+				AND NOT (
+					m.endpoint IN ('getarticletotal', 'getarticletotaldetail')
+					AND m.row_scope = 'item'
+				)`,
+		`CREATE VIEW IF NOT EXISTS official_follower_metric_facts AS
+			SELECT
+				endpoint,
+				ref_date,
+				CAST(json_extract(dimensions_json, '$.user_source') AS INTEGER) AS user_source,
+				CAST(json_extract(raw_json, '$.new_user') AS INTEGER) AS new_user,
+				CAST(json_extract(raw_json, '$.cancel_user') AS INTEGER) AS cancel_user,
+				CAST(json_extract(raw_json, '$.new_user') AS INTEGER)
+					- CAST(json_extract(raw_json, '$.cancel_user') AS INTEGER) AS net_new_user,
+				CAST(json_extract(raw_json, '$.cumulate_user') AS INTEGER) AS cumulate_user,
+				raw_json,
+				last_seen_at
+			FROM official_api_rows
+			WHERE endpoint IN ('getusersummary', 'getusercumulate')`,
+		`CREATE VIEW IF NOT EXISTS official_article_latest_performance AS
+			WITH ranked AS (
+				SELECT
+					*,
+					ROW_NUMBER() OVER (
+						PARTITION BY msgid ORDER BY stat_date DESC, last_seen_at DESC
+					) AS recency_rank
+				FROM official_article_metric_facts
+				WHERE endpoint = 'getarticletotaldetail'
+			)
+			SELECT * FROM ranked WHERE recency_rank = 1`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -217,6 +358,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if err := s.ensureColumn(ctx, "official_layout_outbox", "published_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	if err := s.ensureColumn(ctx, "official_content_articles", "article_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE official_content_articles
+		SET article_type = json_extract(raw_json, '$.article_type')
+		WHERE article_type = '' AND json_type(raw_json, '$.article_type') = 'text'`); err != nil {
+		return fmt.Errorf("backfill official article type: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE VIEW IF NOT EXISTS official_api_fetch_payloads AS
 		SELECT
@@ -397,11 +547,15 @@ func upsertContentArticle(ctx context.Context, tx *sql.Tx, source, objectID stri
 	nowMs := fetchedAt.UnixMilli()
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO official_content_articles (
-			source, object_id, article_index, title, author, digest, content_html,
+			source, object_id, article_index, article_type, title, author, digest, content_html,
 			content_source_url, url, thumb_media_id, thumb_url, is_deleted,
 			raw_json, first_seen_at, last_seen_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source, object_id, article_index) DO UPDATE SET
+			article_type = CASE
+				WHEN excluded.article_type <> '' THEN excluded.article_type
+				ELSE official_content_articles.article_type
+			END,
 			title = excluded.title,
 			author = excluded.author,
 			digest = excluded.digest,
@@ -416,6 +570,7 @@ func upsertContentArticle(ctx context.Context, tx *sql.Tx, source, objectID stri
 		source,
 		objectID,
 		index,
+		stringField(article, "article_type"),
 		stringField(article, "title"),
 		stringField(article, "author"),
 		stringField(article, "digest"),

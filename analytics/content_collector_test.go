@@ -25,7 +25,7 @@ func (f *fakeContentClient) Call(_ context.Context, endpoint wechat.ContentEndpo
 	case "material_get_materialcount":
 		response = `{"news_count":1,"image_count":0,"voice_count":0,"video_count":0}`
 	case "draft_batchget":
-		response = `{"total_count":1,"item_count":1,"item":[{"media_id":"draft-1","update_time":1,"content":{"news_item":[{"title":"draft"}]}}]}`
+		response = `{"total_count":1,"item_count":1,"item":[{"media_id":"draft-1","update_time":1,"content":{"news_item":[{"article_type":"news","title":"draft"}]}}]}`
 	case "freepublish_batchget":
 		response = `{"total_count":1,"item_count":1,"item":[{"article_id":"article-1","update_time":1,"content":{"news_item":[{"title":"published","url":"https://mp.weixin.qq.com/s/x"}]}}]}`
 	case "material_batchget_material":
@@ -92,6 +92,36 @@ func TestContentCollectorCallsAllInventoryAndDetailInterfaces(t *testing.T) {
 	}
 	if fetches != int64(result.Calls) {
 		t.Fatalf("fetches=%d calls=%d", fetches, result.Calls)
+	}
+	state, err := store.GetContentState(context.Background(), "freepublish")
+	if err != nil || state == nil || !state.Complete {
+		t.Fatalf("已发布历史分页必须在详情/评论前获得预留预算：state=%+v err=%v", state, err)
+	}
+}
+
+func TestRefreshPublishedCapturesDraftTypeBeforePublishedPage(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client := &fakeContentClient{}
+	collector := &ContentCollector{Client: client, Store: store}
+	if _, err := collector.RefreshPublished(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"draft_batchget", "freepublish_batchget"}
+	if len(client.calls) != len(want) {
+		t.Fatalf("calls=%v want=%v", client.calls, want)
+	}
+	for i := range want {
+		if client.calls[i] != want[i] {
+			t.Fatalf("自动排版轮询必须先留官方草稿类型：calls=%v", client.calls)
+		}
+	}
+	typed, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'draft' AND article_type = 'news'`)
+	if err != nil || typed != 1 {
+		t.Fatalf("official draft article_type not persisted: typed=%d err=%v", typed, err)
 	}
 }
 

@@ -173,26 +173,60 @@ func (s *Store) AuditHistoricalCoverage(ctx context.Context, requirements []Hist
 
 func (s *Store) readHistoricalCoverageCounts(ctx context.Context, counts *HistoricalCoverageCounts) error {
 	return s.db.QueryRowContext(ctx, `
-		WITH catalog AS MATERIALIZED (
-			SELECT * FROM official_known_article_catalog
+		WITH metric AS MATERIALIZED (
+			SELECT msgid
+			FROM official_api_rows
+			WHERE endpoint IN (
+				'getarticleread', 'getarticleshare', 'getarticlesummary',
+				'getarticletotal', 'getarticletotaldetail'
+			)
+				AND row_scope = 'item' AND msgid <> ''
+			GROUP BY msgid
+		), publication AS MATERIALIZED (
+			SELECT
+				msgid,
+				MAX(title <> '' OR COALESCE(json_extract(raw_json, '$.content_url'), json_extract(raw_json, '$.url'), '') <> '') AS has_metadata
+			FROM official_api_rows
+			WHERE endpoint IN ('getarticlesummary', 'getarticletotal', 'getarticletotaldetail')
+				AND row_scope = 'item' AND msgid <> ''
+			GROUP BY msgid
+		), content AS MATERIALIZED (
+			SELECT
+				message_id AS msgid,
+				MAX(title <> '' AND url <> '' AND content_html <> '') AS content_complete,
+				MAX(title <> '' OR url <> '') AS has_metadata
+			FROM official_content_articles
+			WHERE source = 'freepublish' AND message_id <> ''
+			GROUP BY message_id
+		), identities AS MATERIALIZED (
+			SELECT msgid FROM metric
+			UNION
+			SELECT msgid FROM content
 		)
 		SELECT
 			COUNT(*),
-			COALESCE(SUM(has_read_metrics = 1 OR has_share_metrics = 1 OR has_publication_record = 1), 0),
-			COALESCE(SUM(has_publication_record = 1), 0),
+			(SELECT COUNT(*) FROM metric),
+			(SELECT COUNT(*) FROM publication),
 			(SELECT COUNT(*) FROM official_content_objects WHERE source = 'freepublish'),
 			(SELECT COUNT(*) FROM official_content_articles WHERE source = 'freepublish'),
 			(SELECT COUNT(*) FROM official_content_articles WHERE source = 'freepublish' AND message_id <> ''),
-			COALESCE(SUM(has_content_record = 1 AND (has_read_metrics = 1 OR has_share_metrics = 1 OR has_publication_record = 1)), 0),
-			COALESCE(SUM(has_content_record = 1 AND has_read_metrics = 0 AND has_share_metrics = 0 AND has_publication_record = 0), 0),
-			COALESCE(SUM(has_content_record = 0), 0),
-			COALESCE(SUM(metadata_status = 'content_complete'), 0),
-			COALESCE(SUM(metadata_status = 'metadata_partial'), 0),
-			COALESCE(SUM(metadata_status = 'identity_only'), 0),
+			COALESCE(SUM(content.msgid IS NOT NULL AND metric.msgid IS NOT NULL), 0),
+			COALESCE(SUM(content.msgid IS NOT NULL AND metric.msgid IS NULL), 0),
+			COALESCE(SUM(content.msgid IS NULL AND metric.msgid IS NOT NULL), 0),
+			COALESCE(SUM(COALESCE(content.content_complete, 0) = 1), 0),
 			COALESCE(SUM(
-				instr(msgid, '_') <= 1 OR
-				CAST(substr(msgid, 1, instr(msgid, '_') - 1) AS INTEGER) <= 0 OR
-				CAST(substr(msgid, instr(msgid, '_') + 1) AS INTEGER) <= 0
+				COALESCE(content.content_complete, 0) = 0 AND
+				(COALESCE(content.has_metadata, 0) = 1 OR COALESCE(publication.has_metadata, 0) = 1)
+			), 0),
+			COALESCE(SUM(
+				COALESCE(content.content_complete, 0) = 0 AND
+				COALESCE(content.has_metadata, 0) = 0 AND
+				COALESCE(publication.has_metadata, 0) = 0
+			), 0),
+			COALESCE(SUM(
+				instr(identities.msgid, '_') <= 1 OR
+				CAST(substr(identities.msgid, 1, instr(identities.msgid, '_') - 1) AS INTEGER) <= 0 OR
+				CAST(substr(identities.msgid, instr(identities.msgid, '_') + 1) AS INTEGER) <= 0
 			), 0),
 			(SELECT COUNT(*) FROM (
 				SELECT message_id FROM official_content_articles
@@ -203,7 +237,10 @@ func (s *Store) readHistoricalCoverageCounts(ctx context.Context, counts *Histor
 			(SELECT COUNT(*) FROM official_api_fetches),
 			(SELECT COUNT(*) FROM official_api_fetches WHERE success = 1 AND response_sha256 <> ''),
 			(SELECT COUNT(DISTINCT endpoint) FROM official_api_fetches)
-		FROM catalog
+		FROM identities
+		LEFT JOIN metric ON metric.msgid = identities.msgid
+		LEFT JOIN publication ON publication.msgid = identities.msgid
+		LEFT JOIN content ON content.msgid = identities.msgid
 	`).Scan(
 		&counts.KnownArticleIdentities,
 		&counts.MetricArticleIdentities,
@@ -229,11 +266,22 @@ func (s *Store) readHistoricalCoverageCounts(ctx context.Context, counts *Histor
 func (s *Store) readHistoricalCoverageDates(ctx context.Context, dates *HistoricalCoverageDates) error {
 	var knownMin, knownMax, metricMin, metricMax, freeMin, freeMax sql.NullString
 	err := s.db.QueryRowContext(ctx, `
+		WITH known_publish_dates AS MATERIALIZED (
+			SELECT ref_date AS value
+			FROM official_api_rows
+			WHERE endpoint IN ('getarticlesummary', 'getarticletotal', 'getarticletotaldetail')
+				AND row_scope = 'item' AND ref_date <> '' AND msgid <> ''
+			UNION ALL
+			SELECT date(o.update_time, 'unixepoch', 'localtime') AS value
+			FROM official_content_articles AS a
+			JOIN official_content_objects AS o ON o.source = a.source AND o.object_id = a.object_id
+			WHERE a.source = 'freepublish' AND a.message_id <> '' AND o.update_time > 0
+		)
 		SELECT
-			(SELECT MIN(NULLIF(publish_date, '')) FROM official_known_article_catalog),
-			(SELECT MAX(NULLIF(publish_date, '')) FROM official_known_article_catalog),
-			(SELECT MIN(NULLIF(first_metric_date, '')) FROM official_known_article_catalog),
-			(SELECT MAX(NULLIF(last_metric_date, '')) FROM official_known_article_catalog),
+			(SELECT MIN(value) FROM known_publish_dates),
+			(SELECT MAX(value) FROM known_publish_dates),
+			(SELECT MIN(NULLIF(ref_date, '')) FROM official_api_rows WHERE endpoint IN ('getarticleread', 'getarticleshare', 'getarticletotaldetail') AND row_scope = 'item'),
+			(SELECT MAX(NULLIF(ref_date, '')) FROM official_api_rows WHERE endpoint IN ('getarticleread', 'getarticleshare', 'getarticletotaldetail') AND row_scope = 'item'),
 			(SELECT MIN(date(update_time, 'unixepoch', 'localtime')) FROM official_content_objects WHERE source = 'freepublish'),
 			(SELECT MAX(date(update_time, 'unixepoch', 'localtime')) FROM official_content_objects WHERE source = 'freepublish')
 	`).Scan(&knownMin, &knownMax, &metricMin, &metricMax, &freeMin, &freeMax)

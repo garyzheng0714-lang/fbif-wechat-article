@@ -1,12 +1,32 @@
 package officialbase
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/feishu"
 )
+
+func TestSyncFailsClosedBeforeAnyBaseCallWithoutVerifiedCoverage(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	syncer := &Syncer{Store: store}
+	if _, err := syncer.Sync(context.Background()); err == nil || !strings.Contains(err.Error(), "coverage gate") {
+		t.Fatalf("missing gate must fail closed, got %v", err)
+	}
+	blocked := errors.New("coverage is collecting")
+	syncer.BeforeSync = func(context.Context) error { return blocked }
+	if _, err := syncer.Sync(context.Background()); !errors.Is(err, blocked) {
+		t.Fatalf("coverage rejection must happen before Base access, got %v", err)
+	}
+}
 
 func TestDatasetRegistryCoversEveryArchivedDomain(t *testing.T) {
 	want := map[string]bool{
@@ -16,7 +36,12 @@ func TestDatasetRegistryCoversEveryArchivedDomain(t *testing.T) {
 		archive.BaseDatasetAccountDaily:       true,
 		archive.BaseDatasetFollowerSource:     true,
 		archive.BaseDatasetFollowerCumulative: true,
+		archive.BaseDatasetMessageMetrics:     true,
+		archive.BaseDatasetInterfaceMetrics:   true,
+		archive.BaseDatasetContentAssets:      true,
+		archive.BaseDatasetContentArticles:    true,
 		archive.BaseDatasetComments:           true,
+		archive.BaseDatasetAPIFetches:         true,
 		archive.BaseDatasetSyncStatus:         true,
 	}
 	for _, dataset := range datasets {

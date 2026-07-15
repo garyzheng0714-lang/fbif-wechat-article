@@ -33,12 +33,15 @@ type CombinedRunResult struct {
 }
 
 type RuntimeStatus struct {
-	Ready                 bool                   `json:"ready"`
-	CredentialsConfigured bool                   `json:"credentialsConfigured"`
-	Analytics             *Status                `json:"analytics,omitempty"`
-	ContentStates         []archive.ContentState `json:"contentStates"`
-	Layout                *autolayout.Status     `json:"layout,omitempty"`
-	Reason                string                 `json:"reason,omitempty"`
+	Ready                 bool                              `json:"ready"`
+	ReadySemantics        string                            `json:"readySemantics"`
+	CredentialsConfigured bool                              `json:"credentialsConfigured"`
+	Analytics             *Status                           `json:"analytics,omitempty"`
+	ContentStates         []archive.ContentState            `json:"contentStates"`
+	HistoricalCoverage    *archive.HistoricalCoverageReport `json:"historicalCoverage"`
+	Layout                *autolayout.Status                `json:"layout,omitempty"`
+	Reason                string                            `json:"reason,omitempty"`
+	Warnings              []string                          `json:"warnings,omitempty"`
 }
 
 func NewRuntimeFromEnv() (*Runtime, error) {
@@ -167,6 +170,7 @@ func quotaAwareCallBudget(configuredMax, usableRemaining int, now time.Time, pol
 func (r *Runtime) Status(ctx context.Context) (*RuntimeStatus, error) {
 	status := &RuntimeStatus{
 		CredentialsConfigured: config.Env.WechatAppID != "" && config.Env.WechatSecret != "",
+		ReadySemantics:        "ready 仅表示采集服务和当前接口可运行，不表示历史文章全量已核验；历史口径只看 historicalCoverage.verified",
 	}
 	analyticsStatus, err := r.Analytics.Status(ctx)
 	if err != nil {
@@ -178,21 +182,72 @@ func (r *Runtime) Status(ctx context.Context) (*RuntimeStatus, error) {
 		return nil, err
 	}
 	status.ContentStates = contentStates
+	status.HistoricalCoverage, err = r.HistoricalCoverage(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if r.Layout != nil {
 		status.Layout, err = r.Layout.Status(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
-	status.Ready = status.CredentialsConfigured && analyticsStatus.Ready && (status.Layout == nil || status.Layout.Ready)
+	status.Ready = status.CredentialsConfigured && analyticsStatus.Ready
 	if !status.CredentialsConfigured {
 		status.Reason = "WeChat AppID/AppSecret 未配置"
 	} else if !analyticsStatus.Ready {
 		status.Reason = "尚未成功采集全部 15 个现役官方数据接口，或存在接口权限错误；另有 6 个旧接口已由微信下线"
-	} else if status.Layout != nil && !status.Layout.Ready {
-		status.Reason = status.Layout.Reason
+	}
+	if status.Layout != nil && !status.Layout.Ready {
+		status.Warnings = append(status.Warnings, status.Layout.Reason)
+	}
+	if status.HistoricalCoverage != nil && !status.HistoricalCoverage.Verified {
+		status.Warnings = append(status.Warnings, "历史文章覆盖尚未核验；Base 写回保持关闭")
 	}
 	return status, nil
+}
+
+func (r *Runtime) HistoricalCoverage(ctx context.Context) (*archive.HistoricalCoverageReport, error) {
+	requirements := make([]archive.HistoricalCoverageRequirement, 0)
+	for _, endpoint := range wechat.ActiveDataCubeEndpoints() {
+		requirements = append(requirements, archive.HistoricalCoverageRequirement{
+			Endpoint:     endpoint.Name,
+			EarliestDate: endpoint.EarliestDate,
+		})
+	}
+	return r.Store.AuditHistoricalCoverage(ctx, requirements, time.Now())
+}
+
+func (r *Runtime) ApproveHistoricalCoverage(ctx context.Context, approvedBy string) (*archive.HistoricalCoverageReport, error) {
+	report, err := r.HistoricalCoverage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !report.EligibleForUserApproval {
+		return report, fmt.Errorf("historical coverage is not eligible for user approval")
+	}
+	if err := r.Store.SaveHistoricalCoverageApproval(ctx, approvedBy, time.Now()); err != nil {
+		return report, err
+	}
+	return r.HistoricalCoverage(ctx)
+}
+
+func (r *Runtime) RevokeHistoricalCoverageApproval(ctx context.Context) (*archive.HistoricalCoverageReport, error) {
+	if err := r.Store.RevokeHistoricalCoverageApproval(ctx); err != nil {
+		return nil, err
+	}
+	return r.HistoricalCoverage(ctx)
+}
+
+func (r *Runtime) RequireHistoricalCoverageForBaseSync(ctx context.Context) error {
+	report, err := r.HistoricalCoverage(ctx)
+	if err != nil {
+		return err
+	}
+	if !report.BaseSyncAllowed {
+		return fmt.Errorf("official Base sync blocked: historical coverage status=%s verified=%t", report.Status, report.Verified)
+	}
+	return nil
 }
 
 func (r *Runtime) Start(stopCh <-chan struct{}) {

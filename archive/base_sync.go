@@ -44,6 +44,7 @@ var baseSyncSourceQueries = map[string]string{
 				'消息数据ID', msg_data_id,
 				'文章位置', article_index,
 				'发布日期', CASE WHEN publish_date <> '' THEN CAST(strftime('%s', publish_date) AS INTEGER) * 1000 END,
+				'发布日期来源', publish_date_source,
 				'发表类型', publish_type,
 				'文章标题', title,
 				'文章链接', content_url,
@@ -56,11 +57,19 @@ var baseSyncSourceQueries = map[string]string{
 				'封面图链接', thumb_url,
 				'文章类型', article_type,
 				'是否删除', is_deleted,
+				'证据接口', evidence_endpoints,
+				'首次指标日期', CASE WHEN first_metric_date <> '' THEN CAST(strftime('%s', first_metric_date) AS INTEGER) * 1000 END,
+				'最后指标日期', CASE WHEN last_metric_date <> '' THEN CAST(strftime('%s', last_metric_date) AS INTEGER) * 1000 END,
+				'有发表明细', has_publication_record,
+				'有发布正文', has_content_record,
+				'有阅读指标', has_read_metrics,
+				'有分享指标', has_share_metrics,
+				'元数据状态', metadata_status,
 				'发布原始JSON', publication_raw_json,
 				'正文原始JSON', content_raw_json,
 				'来源更新时间', last_seen_at
 			) AS payload_json
-		FROM official_published_article_catalog`,
+		FROM official_known_article_catalog`,
 	BaseDatasetArticleDaily: `
 		SELECT
 			ref_date || '|' || msgid AS row_key,
@@ -266,7 +275,8 @@ var baseSyncSourceQueries = map[string]string{
 				'首次获取时间', first_seen_at,
 				'来源更新时间', last_seen_at
 			) AS payload_json
-		FROM official_content_objects`,
+		FROM official_content_objects
+		WHERE source = 'freepublish'`,
 	BaseDatasetContentArticles: `
 		SELECT
 			a.source || '|' || a.object_id || '|' || CAST(a.article_index AS TEXT) AS row_key,
@@ -291,7 +301,8 @@ var baseSyncSourceQueries = map[string]string{
 				'首次获取时间', a.first_seen_at,
 				'来源更新时间', a.last_seen_at
 			) AS payload_json
-		FROM official_content_articles AS a`,
+		FROM official_content_articles AS a
+		WHERE a.source = 'freepublish'`,
 	BaseDatasetComments: `
 		SELECT
 			row_key,
@@ -344,7 +355,8 @@ var baseSyncSourceQueries = map[string]string{
 				'调用时间', f.fetched_at
 			) AS payload_json
 		FROM official_api_fetches AS f
-		LEFT JOIN official_api_fetches AS original ON original.id = f.response_ref_id`,
+		LEFT JOIN official_api_fetches AS original ON original.id = f.response_ref_id
+		WHERE f.category NOT IN ('material', 'draft')`,
 	BaseDatasetSyncStatus: `
 		SELECT
 			'api:' || endpoint AS row_key,
@@ -356,8 +368,9 @@ var baseSyncSourceQueries = map[string]string{
 				'分类', category,
 				'回填方向', backfill_direction,
 				'下次回填位置', next_backfill_date,
-				'总数', NULL,
-				'是否完成', backfill_complete,
+				'计数名称', '',
+				'计数值', NULL,
+				'是否回填完成', backfill_complete,
 				'最后成功时间', last_success_at,
 				'最后错误', last_error,
 				'连续失败次数', consecutive_failures,
@@ -372,12 +385,13 @@ var baseSyncSourceQueries = map[string]string{
 			json_object(
 				'唯一键', 'content:' || stream,
 				'数据集', stream,
-				'类型', '内容接口',
-				'分类', 'content',
+				'类型', '发布对象接口',
+				'分类', 'publish',
 				'回填方向', 'newest_to_oldest',
 				'下次回填位置', CAST(next_offset AS TEXT),
-				'总数', total_count,
-				'是否完成', complete,
+				'计数名称', '发布对象数',
+				'计数值', total_count,
+				'是否回填完成', complete,
 				'最后成功时间', last_success_at,
 				'最后错误', last_error,
 				'连续失败次数', CASE WHEN last_error = '' THEN 0 ELSE 1 END,
@@ -399,8 +413,9 @@ var baseSyncSourceQueries = map[string]string{
 				'分类', 'base',
 				'回填方向', '',
 				'下次回填位置', '',
-				'总数', COUNT(*),
-				'是否完成', CASE WHEN SUM(last_error <> '') = 0 THEN 1 ELSE 0 END,
+				'计数名称', 'Base映射记录数',
+				'计数值', COUNT(*),
+				'是否回填完成', CASE WHEN SUM(last_error <> '') = 0 THEN 1 ELSE 0 END,
 				'最后成功时间', MAX(last_synced_at),
 				'最后错误', COALESCE((
 					SELECT latest.last_error

@@ -183,9 +183,8 @@ jobs:
             systemctl enable "${SERVICE_NAME}"
             systemctl start "${SERVICE_NAME}"
 
-            # Health becomes 200 only after all active official analytics
-            # endpoints have succeeded. Poll instead of accepting a fake
-            # process-only health response.
+            # Health is operational readiness only. Historical coverage and
+            # Base-write approval remain separately fail-closed in the API.
             for attempt in $(seq 1 60); do
               if curl -fsS "http://127.0.0.1:3002/health" >/dev/null; then
                 break

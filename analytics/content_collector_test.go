@@ -118,7 +118,7 @@ func TestContentCollectorArchivesOnlyPublishedInventoryAndLatestDraftType(t *tes
 		t.Fatalf("fetches=%d calls=%d", fetches, result.Calls)
 	}
 	state, err := store.GetContentState(context.Background(), "freepublish")
-	if err != nil || state == nil || !state.Complete {
+	if err != nil || state == nil || !state.ObjectInventoryComplete {
 		t.Fatalf("已发布历史分页必须在详情/评论前获得预留预算：state=%+v err=%v", state, err)
 	}
 }

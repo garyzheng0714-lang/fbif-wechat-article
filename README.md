@@ -7,6 +7,8 @@
 
 `fbif-wechat-article` 是一个只使用微信公众号官方 API 的归档与数据采集服务。默认自动归档已发布文章、文章指标和粉丝指标，并可把普通图文送入排版待审流程，或在本地数据完整后批量同步到飞书多维表格。
 
+> **数据口径红线：** `freepublish/batchget.total_count` 是发布对象数，不是公众号历史已发布文章总量。任何“历史全量”结论都必须经过多个官方 API、多表关联、去重及覆盖审计；审计完成并经确认前，飞书 Base 同步保持关闭。详见 [已发布文章真值合同](docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md)。
+
 ## 仓库定位
 
 - 分类：微信工具 / FBIF 内容运营自动化。
@@ -126,7 +128,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `ANALYTICS_BACKFILL_START`，可限制历史补采起点；不填时按各接口官方起始日期
 - `OFFICIAL_COLLECTOR_INITIAL_DELAY_SECONDS`，默认 `5`
 - `ENABLE_OFFICIAL_API_COLLECTOR`，默认开启
-- `ENABLE_FEISHU_SYNC`，默认开启；只运行官方归档时可设为 `0`
+- `ENABLE_FEISHU_SYNC` 是已退役的直接写 Base 链路，代码中永久 fail closed；不得启用
 
 官方数据写回 Base（显式开启）：
 
@@ -134,6 +136,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `OFFICIAL_BASE_SYNC_INTERVAL_MINUTES`，默认 `5`
 - `OFFICIAL_BASE_SYNC_ROWS_PER_DATASET`，默认每轮每张表 `500`
 - `OFFICIAL_BASE_SYNC_INITIAL_DELAY_SECONDS`，默认 `20`
+- 即使开启 worker，`historicalCoverage.verified` 未经完整审计和人工确认时也会在调用飞书接口前拒绝写入
 
 自动排版（显式开启）：
 
@@ -191,10 +194,13 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 | Method | Path | 说明 | 鉴权 |
 | --- | --- | --- | --- |
 | `GET` | `/health` | 健康检查，返回 token 状态和 cursor 摘要。 | 不需要 |
-| `POST` | `/api/feishu/sync` | 手动触发一次同步。 | `API_KEY` |
-| `POST` | `/api/feishu/official-sync` | 手动触发一次全部官方归档数据到 Base 的增量同步。 | `API_KEY` |
+| `POST` | `/api/feishu/sync` | 已退役，固定返回 `410`，防止绕过 SQLite 和覆盖审计直接写 Base。 | `API_KEY` |
+| `POST` | `/api/feishu/official-sync` | 仅在历史覆盖审计已通过并经人工确认后，批量增量写入 Base。 | `API_KEY` |
 | `GET` | `/api/feishu/cursor` | 查看同步进度 cursor。 | `API_KEY` |
 | `GET` | `/api/wechat/official/status` | 查看 15 个现役接口、6 个下线接口、回填游标和存储统计。 | `API_KEY` |
+| `GET` | `/api/wechat/official/coverage` | 查看多接口文章身份并集、关联缺口、回填覆盖和 Base 门禁状态。 | `API_KEY` |
+| `POST` | `/api/wechat/official/coverage` | 仅在 `eligibleForUserApproval=true` 后，携带合同版本、确认短语和确认人完成显式确认。 | `API_KEY` |
+| `DELETE` | `/api/wechat/official/coverage` | 撤销历史覆盖确认并立即关闭 Base 门禁。 | `API_KEY` |
 | `GET` | `/api/wechat/official/endpoints` | 查看全部数据与内容接口清单、生命周期和必填标识符。 | `API_KEY` |
 | `POST` | `/api/wechat/official/collect` | 立即执行一次完整增量采集。 | `API_KEY` |
 | `POST` | `/api/wechat/official/call` | 调用白名单内单个官方接口并归档原始响应。 | `API_KEY` |
@@ -211,17 +217,18 @@ X-API-Key: <token>
 ### 官方 API 采集
 
 - 服务启动后自动采集一次，此后每天北京时间 `08:30` 执行。
-- 15 个现役数据接口必须全部成功，`/health` 才返回 `200`；缺密钥、白名单、权限或接口错误均返回 `503`。
+- `ready` 只表示采集服务与当前接口可运行，绝不表示历史文章全量已核验；历史口径只看 `historicalCoverage.verified`。
 - `getarticletotaldetail` 会重复刷新最近 30 个发表日；其他接口按官方最大跨度拆分并断点回填。
 - 正文、身份与指标分表保存：`official_content_articles` 保存发布正文；`official_article_publications` 用 `msgid=msg_data_id_index` 保存文章身份；`official_article_metric_facts` 关联阅读、分享、阅读后关注等文章事实；`official_follower_metric_facts` 保存账号新增、取关、净增和累计粉丝。`official_article_catalog` 通过官方 `content_url` 关联正文，`official_article_latest_performance` 提供每篇文章最新累计表现。
+- `official_known_article_catalog` 使用 `msgid` 把阅读、分享、发表详情、旧接口留档和 `freepublish` 正文合并为“已知文章身份并集”。其中 `knownArticleIdentities` 只能按这个名称汇报；在完整回填、缺口审计和人工确认前，不得改名为公众号历史文章总量。
 - 官方窗口限制按接口独立执行：`freepublish/batchget` 每页 1–20 个发布对象；新版文章阅读、分享、发表详情从 `2025-11-01` 起提供且查询结束日最多为昨日，其中阅读/分享每次 1 天、发表详情每篇只统计发表后 30 天；用户增减与累计数据从 `2014-12-01` 起提供，用户增减按来源记录，账号净增不得直接归因给单篇文章。
 - 每次请求和响应都留档。相同请求得到完全相同的响应时，后续记录引用第一份原始字节，避免重复正文写满磁盘。
 - 可用 `./wechat-sync collect-once` 做一次性采集和服务器验收。
 
 ### 官方数据写回多维表格
 
-- `ENABLE_OFFICIAL_BASE_SYNC=1` 时，每隔 `OFFICIAL_BASE_SYNC_INTERVAL_MINUTES` 分钟把 SQLite 中已归档的官方数据增量写回 `FEISHU_BITABLE_APP_TOKEN`。
-- 自动维护 8 张可关联的仪表盘数据表：`文章主档`、`文章每日指标`、`文章累计指标`、`账号内容日报`、`粉丝来源日报`、`粉丝累计日报`、`文章评论`、`接口同步状态`。草稿、图片/图文/视频/语音素材、消息指标、接口性能和 API 调用日志不写入 Base。
+- `ENABLE_OFFICIAL_BASE_SYNC=1` 只启动 worker；只有 `historicalCoverage.verified=true` 才允许把 SQLite 中已归档数据增量写回 `FEISHU_BITABLE_APP_TOKEN`。
+- 自动维护 13 张可关联的仪表盘数据表：`文章主档`、`文章每日指标`、`文章累计指标`、`账号内容日报`、`粉丝来源日报`、`粉丝累计日报`、`上行消息指标`、`接口性能指标`、`发布对象原始档`、`发布正文原始档`、`文章评论`、`官方API调用留档`、`接口同步状态`。草稿及图片/图文/视频/语音素材不进入 Base；发布对象和已发布正文原始字段保留。
 - 每条记录使用官方 `msgid`、日期和来源维度组成稳定唯一键；本地保存 Base `record_id` 与 payload hash，只同步新增或变化的记录，不在每轮扫描后全表重写。
 - 所有已知官方字段结构化写入，嵌套数组与未知新增字段同时保留在原始 JSON 字段。Base 单个文本单元格超过平台上限时会写入带 SHA-256 的可追踪截断值，SQLite 始终保留完整原始字节。
 - 新发布正文按轮询间隔同步；微信文章与粉丝统计接口的结束日期最大为昨日，因此指标在官方提供后立即同步，不能伪造成同日实时数据。
@@ -236,13 +243,10 @@ X-API-Key: <token>
 - outbox 在 SQLite 中持久化，网络失败或服务重启后继续重试；公众号 URL 的 `sn/chksm/scene` 变化不会造成重复稿。
 - 排版服务自动流程只到 `awaiting_review`，不会代替人工批准，也不会自动公开到 FoodTalks。
 
-### 主同步
+### 已退役的直接同步
 
-- 启动时自动执行一次轻量同步。
-- 每天 `09:00` 自动同步。
-- 默认只扫描最近 `3` 页。
-- 历史页进度由 cursor 记录。
-- 可通过 `WECHAT_SYNC_COVER_INLINE` 和 `WECHAT_SYNC_BODY_IMAGES_INLINE` 在主同步中内联补齐图片，默认关闭。
+- 旧 `ENABLE_FEISHU_SYNC` 链路会绕过 SQLite 全量关联和人工确认，现已永久 fail closed。
+- `/api/feishu/sync` 固定返回 `410`；唯一允许的 Base 写入入口是带历史覆盖门禁的 `/api/feishu/official-sync`。
 
 ### 媒体 worker
 
@@ -269,4 +273,4 @@ X-API-Key: <token>
 - `.sync-cursor.json` 是本地同步进度文件，不是业务数据。
 - 主同步链路优先保证稳定，媒体补齐和历史回填不应影响主同步。
 - 6 个旧文章分析接口已由微信返回 `47009 this api is offline, please use the new api`；服务不会无限重试，而是记录下线响应并使用新接口。
-- 已发布文章全量列表使用官方 `freepublish/batchget` 倒序分页获取；本服务不用网页或订阅源补造数据。
+- `freepublish/batchget` 仅提供一条官方发布对象采集流；它的分页完成不等于历史文章全量已经核验。本服务不用网页或订阅源补造数据，历史全量结论按 [已发布文章真值合同](docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md) 执行。

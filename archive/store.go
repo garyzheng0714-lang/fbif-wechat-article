@@ -57,6 +57,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		"official_account_daily_metrics",
 		"official_article_daily_metrics",
 		"official_follower_metric_facts",
+		"official_known_article_catalog",
 		"official_published_article_catalog",
 		"official_article_metric_facts",
 		"official_article_catalog",
@@ -217,6 +218,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_official_base_records_pending
 			ON official_base_records(dataset, source_seen_at, last_synced_at)`,
+		`CREATE TABLE IF NOT EXISTS official_history_coverage_approval (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			contract_version TEXT NOT NULL,
+			approved_by TEXT NOT NULL,
+			approved_at INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS official_comments (
 			row_key TEXT PRIMARY KEY,
 			msg_data_id TEXT NOT NULL DEFAULT '',
@@ -269,6 +276,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE VIEW IF NOT EXISTS official_article_publications AS
 			WITH ranked AS (
 				SELECT
+					endpoint,
 					msgid,
 					ref_date,
 					title,
@@ -276,10 +284,17 @@ func (s *Store) migrate(ctx context.Context) error {
 					raw_json,
 					last_seen_at,
 					ROW_NUMBER() OVER (
-						PARTITION BY msgid ORDER BY last_seen_at DESC
+						PARTITION BY msgid ORDER BY
+							CASE endpoint
+								WHEN 'getarticletotaldetail' THEN 3
+								WHEN 'getarticletotal' THEN 2
+								WHEN 'getarticlesummary' THEN 1
+								ELSE 0
+							END DESC,
+							last_seen_at DESC
 					) AS recency_rank
 				FROM official_api_rows
-				WHERE endpoint = 'getarticletotaldetail'
+				WHERE endpoint IN ('getarticletotaldetail', 'getarticletotal', 'getarticlesummary')
 					AND row_scope = 'item'
 					AND msgid <> ''
 			)
@@ -299,7 +314,12 @@ func (s *Store) migrate(ctx context.Context) error {
 					json_extract(raw_json, '$.publish_type')
 				) AS INTEGER) AS publish_type,
 				title,
-				COALESCE(json_extract(raw_json, '$.content_url'), '') AS content_url,
+				COALESCE(
+					json_extract(raw_json, '$.content_url'),
+					json_extract(raw_json, '$.url'),
+					''
+				) AS content_url,
+				endpoint AS publication_endpoint,
 				raw_json AS publication_raw_json,
 				last_seen_at
 			FROM ranked
@@ -395,7 +415,7 @@ func (s *Store) migrate(ctx context.Context) error {
 				m.raw_json,
 				m.last_seen_at
 			FROM official_article_metrics AS m
-			LEFT JOIN official_article_catalog AS p ON p.msgid = m.msgid
+			LEFT JOIN official_known_article_catalog AS p ON p.msgid = m.msgid
 			WHERE m.msgid <> ''
 				AND NOT (
 					m.endpoint IN ('getarticletotal', 'getarticletotaldetail')
@@ -449,6 +469,101 @@ func (s *Store) migrate(ctx context.Context) error {
 				ON o.source = a.source AND o.object_id = a.object_id
 			LEFT JOIN official_article_publications AS p ON p.content_url = a.url
 			WHERE a.source = 'freepublish' AND a.message_id <> ''`,
+		`CREATE VIEW IF NOT EXISTS official_known_article_catalog AS
+			WITH metric_evidence AS (
+				SELECT
+					msgid,
+					MIN(NULLIF(ref_date, '')) AS first_metric_date,
+					MAX(NULLIF(ref_date, '')) AS last_metric_date,
+					MAX(CASE WHEN endpoint = 'getarticleread' THEN 1 ELSE 0 END) AS has_read_metrics,
+					MAX(CASE WHEN endpoint = 'getarticleshare' THEN 1 ELSE 0 END) AS has_share_metrics,
+					MAX(CASE WHEN endpoint = 'getarticlesummary' THEN 1 ELSE 0 END) AS has_legacy_summary,
+					MAX(CASE WHEN endpoint = 'getarticletotal' THEN 1 ELSE 0 END) AS has_legacy_total,
+					MAX(CASE WHEN endpoint = 'getarticletotaldetail' THEN 1 ELSE 0 END) AS has_publication_detail,
+					MAX(last_seen_at) AS metric_last_seen_at
+				FROM official_api_rows
+				WHERE endpoint IN (
+					'getarticleread', 'getarticleshare', 'getarticlesummary',
+					'getarticletotal', 'getarticletotaldetail'
+				)
+					AND row_scope = 'item'
+					AND msgid <> ''
+				GROUP BY msgid
+			), ranked_content AS (
+				SELECT
+					content.*,
+					ROW_NUMBER() OVER (
+						PARTITION BY content.msgid
+						ORDER BY content.last_seen_at DESC, content.article_id DESC
+					) AS recency_rank
+				FROM official_published_article_catalog AS content
+			), content AS (
+				SELECT * FROM ranked_content WHERE recency_rank = 1
+			), identities AS (
+				SELECT msgid FROM metric_evidence
+				UNION
+				SELECT msgid FROM content
+			)
+			SELECT
+				i.msgid,
+				CASE
+					WHEN instr(i.msgid, '_') > 0 THEN substr(i.msgid, 1, instr(i.msgid, '_') - 1)
+					ELSE i.msgid
+				END AS msg_data_id,
+				CASE
+					WHEN instr(i.msgid, '_') > 0 THEN CAST(substr(i.msgid, instr(i.msgid, '_') + 1) AS INTEGER)
+					ELSE 0
+				END AS article_index,
+				COALESCE(NULLIF(p.publish_date, ''), NULLIF(c.publish_date, ''), '') AS publish_date,
+				CASE
+					WHEN p.msgid IS NOT NULL THEN p.publication_endpoint
+					WHEN c.msgid IS NOT NULL THEN 'freepublish_update_time'
+					ELSE ''
+				END AS publish_date_source,
+				COALESCE(p.publish_type, c.publish_type) AS publish_type,
+				COALESCE(NULLIF(c.title, ''), NULLIF(p.title, ''), '') AS title,
+				COALESCE(NULLIF(c.content_url, ''), NULLIF(p.content_url, ''), '') AS content_url,
+				COALESCE(c.article_id, '') AS article_id,
+				c.content_article_index,
+				COALESCE(c.author, '') AS author,
+				COALESCE(c.digest, '') AS digest,
+				COALESCE(c.content_html, '') AS content_html,
+				COALESCE(c.content_source_url, '') AS content_source_url,
+				COALESCE(c.thumb_media_id, '') AS thumb_media_id,
+				COALESCE(c.thumb_url, '') AS thumb_url,
+				COALESCE(c.article_type, '') AS article_type,
+				COALESCE(c.is_deleted, 0) AS is_deleted,
+				TRIM(
+					CASE WHEN c.msgid IS NOT NULL THEN 'freepublish,' ELSE '' END ||
+					CASE WHEN COALESCE(m.has_publication_detail, 0) = 1 THEN 'getarticletotaldetail,' ELSE '' END ||
+					CASE WHEN COALESCE(m.has_legacy_total, 0) = 1 THEN 'getarticletotal,' ELSE '' END ||
+					CASE WHEN COALESCE(m.has_legacy_summary, 0) = 1 THEN 'getarticlesummary,' ELSE '' END ||
+					CASE WHEN COALESCE(m.has_read_metrics, 0) = 1 THEN 'getarticleread,' ELSE '' END ||
+					CASE WHEN COALESCE(m.has_share_metrics, 0) = 1 THEN 'getarticleshare,' ELSE '' END,
+					','
+				) AS evidence_endpoints,
+				COALESCE(m.first_metric_date, '') AS first_metric_date,
+				COALESCE(m.last_metric_date, '') AS last_metric_date,
+				CASE WHEN p.msgid IS NOT NULL THEN 1 ELSE 0 END AS has_publication_record,
+				CASE WHEN c.msgid IS NOT NULL THEN 1 ELSE 0 END AS has_content_record,
+				COALESCE(m.has_read_metrics, 0) AS has_read_metrics,
+				COALESCE(m.has_share_metrics, 0) AS has_share_metrics,
+				CASE
+					WHEN COALESCE(c.title, '') <> '' AND COALESCE(c.content_url, '') <> '' AND COALESCE(c.content_html, '') <> '' THEN 'content_complete'
+					WHEN COALESCE(NULLIF(c.title, ''), NULLIF(p.title, ''), '') <> '' OR COALESCE(NULLIF(c.content_url, ''), NULLIF(p.content_url, ''), '') <> '' THEN 'metadata_partial'
+					ELSE 'identity_only'
+				END AS metadata_status,
+				p.publication_raw_json,
+				c.content_raw_json,
+				MAX(
+					COALESCE(m.metric_last_seen_at, 0),
+					COALESCE(p.last_seen_at, 0),
+					COALESCE(c.last_seen_at, 0)
+				) AS last_seen_at
+			FROM identities AS i
+			LEFT JOIN metric_evidence AS m ON m.msgid = i.msgid
+			LEFT JOIN official_article_publications AS p ON p.msgid = i.msgid
+			LEFT JOIN content AS c ON c.msgid = i.msgid`,
 		`CREATE VIEW IF NOT EXISTS official_follower_metric_facts AS
 			SELECT
 				endpoint,
@@ -513,7 +628,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			FROM keys AS k
 			LEFT JOIN reads AS r ON r.ref_date = k.ref_date AND r.msgid = k.msgid
 			LEFT JOIN shares AS s ON s.ref_date = k.ref_date AND s.msgid = k.msgid
-			LEFT JOIN official_article_catalog AS c ON c.msgid = k.msgid`,
+			LEFT JOIN official_known_article_catalog AS c ON c.msgid = k.msgid`,
 		`CREATE VIEW IF NOT EXISTS official_account_daily_metrics AS
 			SELECT
 				ref_date,
@@ -629,9 +744,11 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 }
 
 type ContentPageInfo struct {
-	TotalCount int
-	ItemCount  int
-	ObjectIDs  []string
+	// ObjectTotalCount is the upstream stream's object count. For freepublish
+	// it is never a verified historical article total.
+	ObjectTotalCount int
+	ItemCount        int
+	ObjectIDs        []string
 }
 
 func (s *Store) SaveContentPage(ctx context.Context, source string, responseJSON []byte, fetchedAt time.Time) (ContentPageInfo, error) {
@@ -652,7 +769,7 @@ func (s *Store) SaveContentPage(ctx context.Context, source string, responseJSON
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	info := ContentPageInfo{TotalCount: page.TotalCount, ItemCount: page.ItemCount}
+	info := ContentPageInfo{ObjectTotalCount: page.TotalCount, ItemCount: page.ItemCount}
 	for _, raw := range page.Item {
 		objectID, err := upsertContentObject(ctx, tx, source, raw, fetchedAt)
 		if err != nil {
@@ -917,13 +1034,13 @@ func (s *Store) ArticleMessageIDs(ctx context.Context, refDate string, limit int
 }
 
 type ContentState struct {
-	Stream        string `json:"stream"`
-	NextOffset    int    `json:"nextOffset"`
-	TotalCount    int    `json:"totalCount"`
-	Complete      bool   `json:"complete"`
-	LastSuccessAt int64  `json:"lastSuccessAt"`
-	LastError     string `json:"lastError"`
-	UpdatedAt     int64  `json:"updatedAt"`
+	Stream                  string `json:"stream"`
+	NextObjectOffset        int    `json:"nextObjectOffset"`
+	ObjectTotalCount        int    `json:"objectTotalCount"`
+	ObjectInventoryComplete bool   `json:"objectInventoryComplete"`
+	LastSuccessAt           int64  `json:"lastSuccessAt"`
+	LastError               string `json:"lastError"`
+	UpdatedAt               int64  `json:"updatedAt"`
 }
 
 func (s *Store) GetContentState(ctx context.Context, stream string) (*ContentState, error) {
@@ -933,13 +1050,13 @@ func (s *Store) GetContentState(ctx context.Context, stream string) (*ContentSta
 		FROM official_content_state WHERE stream = ?`, stream)
 	var state ContentState
 	var complete int
-	if err := row.Scan(&state.Stream, &state.NextOffset, &state.TotalCount, &complete, &state.LastSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
+	if err := row.Scan(&state.Stream, &state.NextObjectOffset, &state.ObjectTotalCount, &complete, &state.LastSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
 	}
-	state.Complete = complete != 0
+	state.ObjectInventoryComplete = complete != 0
 	return &state, nil
 }
 
@@ -956,10 +1073,10 @@ func (s *Store) ListContentStates(ctx context.Context) ([]ContentState, error) {
 	for rows.Next() {
 		var state ContentState
 		var complete int
-		if err := rows.Scan(&state.Stream, &state.NextOffset, &state.TotalCount, &complete, &state.LastSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.Stream, &state.NextObjectOffset, &state.ObjectTotalCount, &complete, &state.LastSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
-		state.Complete = complete != 0
+		state.ObjectInventoryComplete = complete != 0
 		states = append(states, state)
 	}
 	return states, rows.Err()

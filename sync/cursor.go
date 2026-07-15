@@ -9,13 +9,13 @@ import (
 )
 
 type SyncCursor struct {
-	OldestSyncedDate          string `json:"oldestSyncedDate"`
-	NewestSyncedDate          string `json:"newestSyncedDate"`
-	BackfillComplete          bool   `json:"backfillComplete"`
-	PublishedScannedPages     int    `json:"publishedScannedPages,omitempty"`
-	PublishedBackfillComplete bool   `json:"publishedBackfillComplete,omitempty"`
-	MaterialNewsOffset        int    `json:"materialNewsOffset,omitempty"`
-	MaterialBackfillComplete  bool   `json:"materialBackfillComplete,omitempty"`
+	OldestSyncedDate                   string `json:"oldestSyncedDate"`
+	NewestSyncedDate                   string `json:"newestSyncedDate"`
+	BackfillComplete                   bool   `json:"backfillComplete"`
+	FreePublishScannedPages            int    `json:"freePublishScannedPages,omitempty"`
+	FreePublishObjectInventoryComplete bool   `json:"freePublishObjectInventoryComplete,omitempty"`
+	MaterialNewsOffset                 int    `json:"materialNewsOffset,omitempty"`
+	MaterialBackfillComplete           bool   `json:"materialBackfillComplete,omitempty"`
 }
 
 func getCursorPaths() []string {
@@ -51,12 +51,12 @@ func WriteCursor(cursor *SyncCursor) error {
 		return fmt.Errorf("write cursor: %w", err)
 	}
 	log.Printf(
-		"[Cursor] Saved: oldest=%s newest=%s complete=%v published_pages=%d published_done=%v material_offset=%d material_done=%v",
+		"[Cursor] Saved: oldest=%s newest=%s complete=%v freepublish_object_pages=%d freepublish_object_inventory_complete=%v material_offset=%d material_done=%v",
 		cursor.OldestSyncedDate,
 		cursor.NewestSyncedDate,
 		cursor.BackfillComplete,
-		cursor.PublishedScannedPages,
-		cursor.PublishedBackfillComplete,
+		cursor.FreePublishScannedPages,
+		cursor.FreePublishObjectInventoryComplete,
 		cursor.MaterialNewsOffset,
 		cursor.MaterialBackfillComplete,
 	)

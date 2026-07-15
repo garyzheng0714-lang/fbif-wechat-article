@@ -71,23 +71,14 @@ func main() {
 	mux.HandleFunc("/api/feishu/official-sync", requireAPIKey(officialBaseSyncHandler))
 	mux.HandleFunc("/api/feishu/cursor", requireAPIKey(cursorHandler))
 	mux.HandleFunc("/api/wechat/official/status", requireAPIKey(officialStatusHandler))
+	mux.HandleFunc("/api/wechat/official/coverage", requireAPIKey(officialCoverageHandler))
 	mux.HandleFunc("/api/wechat/official/endpoints", requireAPIKey(officialEndpointsHandler))
 	mux.HandleFunc("/api/wechat/official/collect", requireAPIKey(officialCollectHandler))
 	mux.HandleFunc("/api/wechat/official/call", requireAPIKey(officialCallHandler))
 
 	stopCh := make(chan struct{})
-	if featureEnabled("ENABLE_FEISHU_SYNC", true) {
-		appSync.StartScheduler(stopCh)
-		appSync.StartMediaWorker(stopCh)
-		appSync.StartHistoryWorker(stopCh)
-		go func() {
-			log.Println("[Startup] Running initial Feishu sync...")
-			if err := appSync.RunDailySync(); err != nil {
-				log.Printf("[Startup] Feishu sync failed: %v", err)
-			}
-		}()
-	} else {
-		log.Println("[Startup] Feishu sync disabled by ENABLE_FEISHU_SYNC=0")
+	if featureEnabled("ENABLE_FEISHU_SYNC", false) {
+		log.Println("[Safety] Legacy direct Feishu sync remains disabled: SQLite-first and historical coverage approval are mandatory")
 	}
 	if officialRuntime != nil {
 		officialRuntime.Start(stopCh)
@@ -97,6 +88,7 @@ func main() {
 			log.Println("[OfficialBase] disabled because official API collector is unavailable")
 		} else {
 			officialBaseSyncer = officialbase.NewFromEnv(officialRuntime.Store)
+			officialBaseSyncer.BeforeSync = officialRuntime.RequireHistoricalCoverageForBaseSync
 			officialbase.Start(stopCh, officialBaseSyncer)
 		}
 	}
@@ -219,18 +211,9 @@ func syncHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("[Route] Triggering daily sync...")
-	if err := appSync.RunDailySync(); err != nil {
-		log.Printf("[Route] Daily sync failed: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
-		return
-	}
-
-	cursor, _ := appSync.ReadCursor()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"message": "Daily sync completed",
-		"cursor":  cursor,
+	writeJSON(w, http.StatusGone, map[string]interface{}{
+		"success": false,
+		"error":   "legacy direct Feishu sync is permanently disabled; collect into SQLite first, then use /api/feishu/official-sync after historicalCoverage.verified=true",
 	})
 }
 
@@ -261,6 +244,60 @@ func officialStatusHandler(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusServiceUnavailable
 	}
 	writeJSON(w, statusCode, map[string]interface{}{"success": status.Ready, "status": status})
+}
+
+func officialCoverageHandler(w http.ResponseWriter, r *http.Request) {
+	if officialRuntime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "official API collector disabled"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		report, err := officialRuntime.HistoricalCoverage(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "coverage": report})
+	case http.MethodPost:
+		var input struct {
+			ContractVersion string `json:"contractVersion"`
+			ApprovedBy      string `json:"approvedBy"`
+			Confirm         string `json:"confirm"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "invalid JSON body"})
+			return
+		}
+		current, err := officialRuntime.HistoricalCoverage(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		if input.ContractVersion != current.ContractVersion || input.Confirm != "确认历史覆盖审计并启用Base同步" {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"success":  false,
+				"error":    "contractVersion or explicit confirmation phrase does not match",
+				"coverage": current,
+			})
+			return
+		}
+		report, err := officialRuntime.ApproveHistoricalCoverage(r.Context(), input.ApprovedBy)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]interface{}{"success": false, "coverage": report, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "coverage": report})
+	case http.MethodDelete:
+		report, err := officialRuntime.RevokeHistoricalCoverageApproval(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "coverage": report})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": "GET, POST or DELETE only"})
+	}
 }
 
 func officialEndpointsHandler(w http.ResponseWriter, r *http.Request) {

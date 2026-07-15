@@ -90,21 +90,21 @@ func SyncPublishedArticles() (*PublishedSyncResult, error) {
 	}
 
 	pagesToScan := recentPages
-	if !cursor.PublishedBackfillComplete {
-		if cursor.PublishedScannedPages > recentPages {
-			pagesToScan = cursor.PublishedScannedPages + backfillGrowPages
+	if !cursor.FreePublishObjectInventoryComplete {
+		if cursor.FreePublishScannedPages > recentPages {
+			pagesToScan = cursor.FreePublishScannedPages + backfillGrowPages
 		} else {
 			pagesToScan = recentPages + backfillGrowPages
 		}
 	}
 
-	log.Printf("[PublishedSync] Scanning %d pages of published articles (page_size=%d, historical_complete=%v)",
-		pagesToScan, pageSize, cursor.PublishedBackfillComplete)
+	log.Printf("[PublishedSync] Scanning %d freepublish object pages (page_size=%d, object_inventory_complete=%v)",
+		pagesToScan, pageSize, cursor.FreePublishObjectInventoryComplete)
 
 	records := make([]feishu.SyncRecord, 0, pagesToScan*pageSize)
 	result := &PublishedSyncResult{}
 	actualPages := 0
-	backfillComplete := cursor.PublishedBackfillComplete
+	backfillComplete := cursor.FreePublishObjectInventoryComplete
 
 	for page := 0; page < pagesToScan; page++ {
 		offset := page * pageSize
@@ -146,18 +146,18 @@ func SyncPublishedArticles() (*PublishedSyncResult, error) {
 	result.Created = upsertResult.Created
 	result.Updated = upsertResult.Updated
 
-	if actualPages > cursor.PublishedScannedPages {
-		cursor.PublishedScannedPages = actualPages
+	if actualPages > cursor.FreePublishScannedPages {
+		cursor.FreePublishScannedPages = actualPages
 	}
 	if backfillComplete {
-		cursor.PublishedBackfillComplete = true
+		cursor.FreePublishObjectInventoryComplete = true
 	}
 	if err := WriteCursor(cursor); err != nil {
 		return nil, fmt.Errorf("write cursor after published sync: %w", err)
 	}
 
-	log.Printf("[PublishedSync] Done: pages=%d records=%d created=%d updated=%d historical_complete=%v",
-		result.PagesScanned, result.RecordsSeen, result.Created, result.Updated, cursor.PublishedBackfillComplete)
+	log.Printf("[PublishedSync] Done: object_pages=%d article_items=%d created=%d updated=%d object_inventory_complete=%v",
+		result.PagesScanned, result.RecordsSeen, result.Created, result.Updated, cursor.FreePublishObjectInventoryComplete)
 
 	return result, nil
 }

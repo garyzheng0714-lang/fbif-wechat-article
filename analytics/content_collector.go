@@ -124,8 +124,8 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 			if nextOffset == 0 {
 				nextOffset = len(latestPublishedPage.ObjectIDs)
 			}
-			complete := nextOffset == 0 || nextOffset >= latestPublishedPage.TotalCount
-			if err := c.Store.MarkContentPageSuccess(ctx, publishedStream.Name, nextOffset, latestPublishedPage.TotalCount, complete, c.now()); err != nil {
+			complete := nextOffset == 0 || nextOffset >= latestPublishedPage.ObjectTotalCount
+			if err := c.Store.MarkContentPageSuccess(ctx, publishedStream.Name, nextOffset, latestPublishedPage.ObjectTotalCount, complete, c.now()); err != nil {
 				failed[publishedStream.Name] = true
 				result.Errors["freepublish_history"] = err.Error()
 				runErrors = append(runErrors, err)
@@ -142,12 +142,12 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 			runErrors = append(runErrors, err)
 			break
 		}
-		if state != nil && state.Complete {
+		if state != nil && state.ObjectInventoryComplete {
 			break
 		}
 		offset := 0
 		if state != nil {
-			offset = state.NextOffset
+			offset = state.NextObjectOffset
 		}
 		_, err = c.fetchPage(ctx, publishedStream, offset, true)
 		result.Calls++
@@ -286,8 +286,8 @@ func (c *ContentCollector) fetchPage(ctx context.Context, stream contentStream, 
 			itemCount = len(info.ObjectIDs)
 		}
 		nextOffset := offset + itemCount
-		complete := itemCount == 0 || nextOffset >= info.TotalCount
-		if err := c.Store.MarkContentPageSuccess(ctx, stream.Name, nextOffset, info.TotalCount, complete, c.now()); err != nil {
+		complete := itemCount == 0 || nextOffset >= info.ObjectTotalCount
+		if err := c.Store.MarkContentPageSuccess(ctx, stream.Name, nextOffset, info.ObjectTotalCount, complete, c.now()); err != nil {
 			return archive.ContentPageInfo{}, err
 		}
 	}

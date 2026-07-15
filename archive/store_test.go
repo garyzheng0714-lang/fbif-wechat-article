@@ -487,7 +487,7 @@ func TestSaveContentPagePreservesObjectsAndFullArticleFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.TotalCount != 1 || len(info.ObjectIDs) != 1 || info.ObjectIDs[0] != "article-1" {
+	if info.ObjectTotalCount != 1 || len(info.ObjectIDs) != 1 || info.ObjectIDs[0] != "article-1" {
 		t.Fatalf("page info = %+v", info)
 	}
 	objects, _ := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_objects WHERE source = 'freepublish'`)
@@ -495,6 +495,31 @@ func TestSaveContentPagePreservesObjectsAndFullArticleFields(t *testing.T) {
 	unknown, _ := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE json_extract(raw_json, '$.unknown_new_field.keep') = 1`)
 	if objects != 1 || articles != 1 || unknown != 1 {
 		t.Fatalf("objects=%d articles=%d unknown=%d", objects, articles, unknown)
+	}
+}
+
+func TestFreePublishTotalCountIsObjectCountNotArticleCount(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	raw := []byte(`{"total_count":1,"item_count":1,"item":[{"article_id":"publish-object-1","update_time":100,"content":{"news_item":[{"title":"第一篇","url":"https://mp.weixin.qq.com/s/one"},{"title":"第二篇","url":"https://mp.weixin.qq.com/s/two"}]}}]}`)
+	info, err := store.SaveContentPage(context.Background(), "freepublish", raw, time.Unix(100, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_objects WHERE source = 'freepublish'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	articles, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'freepublish'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ObjectTotalCount != 1 || objects != 1 || articles != 2 {
+		t.Fatalf("freepublish total_count must remain an object count: info=%d objects=%d articles=%d", info.ObjectTotalCount, objects, articles)
 	}
 }
 

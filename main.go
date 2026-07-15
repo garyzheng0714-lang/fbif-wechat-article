@@ -15,11 +15,13 @@ import (
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/analytics"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
+	"github.com/garyzheng0714-lang/fbif-wechat-article/officialbase"
 	appSync "github.com/garyzheng0714-lang/fbif-wechat-article/sync"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
 var officialRuntime *analytics.Runtime
+var officialBaseSyncer *officialbase.Syncer
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
@@ -66,6 +68,7 @@ func main() {
 	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/feishu/sync", requireAPIKey(syncHandler))
+	mux.HandleFunc("/api/feishu/official-sync", requireAPIKey(officialBaseSyncHandler))
 	mux.HandleFunc("/api/feishu/cursor", requireAPIKey(cursorHandler))
 	mux.HandleFunc("/api/wechat/official/status", requireAPIKey(officialStatusHandler))
 	mux.HandleFunc("/api/wechat/official/endpoints", requireAPIKey(officialEndpointsHandler))
@@ -89,6 +92,14 @@ func main() {
 	if officialRuntime != nil {
 		officialRuntime.Start(stopCh)
 	}
+	if officialbase.Enabled() {
+		if officialRuntime == nil {
+			log.Println("[OfficialBase] disabled because official API collector is unavailable")
+		} else {
+			officialBaseSyncer = officialbase.NewFromEnv(officialRuntime.Store)
+			officialbase.Start(stopCh, officialBaseSyncer)
+		}
+	}
 
 	addr := fmt.Sprintf(":%d", config.Env.ServerPort)
 	log.Printf("Server running on http://localhost%s", addr)
@@ -105,6 +116,23 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+func officialBaseSyncHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": "POST only"})
+		return
+	}
+	if officialBaseSyncer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "official Base sync disabled"})
+		return
+	}
+	result, err := officialBaseSyncer.Sync(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"success": false, "result": result, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "result": result})
 }
 
 func configureRuntime() {

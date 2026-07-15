@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,6 +52,22 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	for _, view := range []string{
+		"official_article_latest_performance",
+		"official_account_daily_metrics",
+		"official_article_daily_metrics",
+		"official_follower_metric_facts",
+		"official_published_article_catalog",
+		"official_article_metric_facts",
+		"official_article_catalog",
+		"official_article_publications",
+		"official_article_metrics",
+		"official_api_fetch_payloads",
+	} {
+		if _, err := s.db.ExecContext(ctx, "DROP VIEW IF EXISTS "+view); err != nil {
+			return fmt.Errorf("refresh analytics view %s: %w", view, err)
+		}
+	}
 	statements := []string{
 		`PRAGMA busy_timeout = 10000`,
 		`PRAGMA journal_mode = WAL`,
@@ -108,6 +125,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			ON official_api_rows(endpoint, ref_date, stat_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_official_api_rows_metric_join
 			ON official_api_rows(endpoint, row_scope, msgid, stat_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_api_rows_sync
+			ON official_api_rows(endpoint, row_scope, last_seen_at)`,
 		`CREATE TABLE IF NOT EXISTS official_content_objects (
 			source TEXT NOT NULL,
 			object_id TEXT NOT NULL,
@@ -126,6 +145,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			object_id TEXT NOT NULL,
 			article_index INTEGER NOT NULL,
 			article_type TEXT NOT NULL DEFAULT '',
+			message_id TEXT NOT NULL DEFAULT '',
 			title TEXT NOT NULL DEFAULT '',
 			author TEXT NOT NULL DEFAULT '',
 			digest TEXT NOT NULL DEFAULT '',
@@ -144,6 +164,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			ON official_content_articles(url)`,
 		`CREATE INDEX IF NOT EXISTS idx_official_content_articles_type_match
 			ON official_content_articles(source, article_index, title)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_content_articles_sync
+			ON official_content_articles(source, last_seen_at)`,
 		`CREATE TABLE IF NOT EXISTS official_content_state (
 			stream TEXT PRIMARY KEY,
 			next_offset INTEGER NOT NULL DEFAULT 0,
@@ -181,6 +203,37 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_official_layout_outbox_due
 			ON official_layout_outbox(status, next_attempt_at, created_at)`,
+		`CREATE TABLE IF NOT EXISTS official_base_records (
+			dataset TEXT NOT NULL,
+			row_key TEXT NOT NULL,
+			record_id TEXT NOT NULL DEFAULT '',
+			payload_sha256 TEXT NOT NULL DEFAULT '',
+			source_seen_at INTEGER NOT NULL DEFAULT 0,
+			last_synced_at INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY(dataset, row_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_base_records_pending
+			ON official_base_records(dataset, source_seen_at, last_synced_at)`,
+		`CREATE TABLE IF NOT EXISTS official_comments (
+			row_key TEXT PRIMARY KEY,
+			msg_data_id TEXT NOT NULL DEFAULT '',
+			article_index INTEGER NOT NULL DEFAULT 0,
+			user_comment_id TEXT NOT NULL DEFAULT '',
+			create_time INTEGER NOT NULL DEFAULT 0,
+			content TEXT NOT NULL DEFAULT '',
+			comment_type INTEGER NOT NULL DEFAULT 0,
+			openid TEXT NOT NULL DEFAULT '',
+			reply_content TEXT NOT NULL DEFAULT '',
+			reply_create_time INTEGER NOT NULL DEFAULT 0,
+			raw_json TEXT NOT NULL,
+			first_seen_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_comments_article
+			ON official_comments(msg_data_id, article_index, create_time)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_comments_sync
+			ON official_comments(last_seen_at)`,
 		`CREATE VIEW IF NOT EXISTS official_article_metrics AS
 			SELECT
 				endpoint,
@@ -245,6 +298,7 @@ func (s *Store) migrate(ctx context.Context) error {
 				) AS INTEGER) AS publish_type,
 				title,
 				COALESCE(json_extract(raw_json, '$.content_url'), '') AS content_url,
+				raw_json AS publication_raw_json,
 				last_seen_at
 			FROM ranked
 			WHERE recency_rank = 1`,
@@ -274,9 +328,27 @@ func (s *Store) migrate(ctx context.Context) error {
 				c.content_source_url,
 				c.thumb_media_id,
 				c.thumb_url,
-				c.article_type,
+				COALESCE(NULLIF(c.article_type, ''), (
+					SELECT CASE
+						WHEN COUNT(*) = 0 THEN ''
+						WHEN COUNT(DISTINCT d.article_type) = 1 THEN MIN(d.article_type)
+						ELSE ''
+					END
+					FROM official_content_articles AS d
+					WHERE d.source = 'draft'
+						AND d.article_type <> ''
+						AND d.article_index = c.article_index
+						AND d.title = c.title
+						AND d.author = c.author
+						AND d.content_html = c.content_html
+						AND d.content_source_url = c.content_source_url
+						AND d.thumb_media_id = c.thumb_media_id
+						AND d.thumb_url = c.thumb_url
+				), '') AS article_type,
 				c.is_deleted,
-				p.last_seen_at
+				p.publication_raw_json,
+				c.raw_json AS content_raw_json,
+				MAX(p.last_seen_at, COALESCE(c.last_seen_at, 0)) AS last_seen_at
 			FROM official_article_publications AS p
 			LEFT JOIN ranked_content AS c
 				ON c.url = p.content_url AND c.recency_rank = 1`,
@@ -322,6 +394,52 @@ func (s *Store) migrate(ctx context.Context) error {
 					m.endpoint IN ('getarticletotal', 'getarticletotaldetail')
 					AND m.row_scope = 'item'
 				)`,
+		`CREATE VIEW IF NOT EXISTS official_published_article_catalog AS
+			SELECT
+				a.message_id AS msgid,
+				CASE
+					WHEN instr(a.message_id, '_') > 0 THEN substr(a.message_id, 1, instr(a.message_id, '_') - 1)
+					ELSE a.message_id
+				END AS msg_data_id,
+				a.article_index + 1 AS article_index,
+				COALESCE(p.publish_date, date(o.update_time, 'unixepoch', 'localtime')) AS publish_date,
+				p.publish_type,
+				a.title,
+				a.url AS content_url,
+				a.object_id AS article_id,
+				a.article_index AS content_article_index,
+				a.author,
+				a.digest,
+				a.content_html,
+				a.content_source_url,
+				a.thumb_media_id,
+				a.thumb_url,
+				COALESCE(NULLIF(a.article_type, ''), (
+					SELECT CASE
+						WHEN COUNT(*) = 0 THEN ''
+						WHEN COUNT(DISTINCT d.article_type) = 1 THEN MIN(d.article_type)
+						ELSE ''
+					END
+					FROM official_content_articles AS d
+					WHERE d.source = 'draft'
+						AND d.article_type <> ''
+						AND d.article_index = a.article_index
+						AND d.title = a.title
+						AND d.author = a.author
+						AND d.content_html = a.content_html
+						AND d.content_source_url = a.content_source_url
+						AND d.thumb_media_id = a.thumb_media_id
+						AND d.thumb_url = a.thumb_url
+				), '') AS article_type,
+				a.is_deleted,
+				p.publication_raw_json,
+				a.raw_json AS content_raw_json,
+				MAX(a.last_seen_at, o.last_seen_at, COALESCE(p.last_seen_at, 0)) AS last_seen_at
+			FROM official_content_articles AS a
+			JOIN official_content_objects AS o
+				ON o.source = a.source AND o.object_id = a.object_id
+			LEFT JOIN official_article_publications AS p ON p.content_url = a.url
+			WHERE a.source = 'freepublish' AND a.message_id <> ''`,
 		`CREATE VIEW IF NOT EXISTS official_follower_metric_facts AS
 			SELECT
 				endpoint,
@@ -336,6 +454,73 @@ func (s *Store) migrate(ctx context.Context) error {
 				last_seen_at
 			FROM official_api_rows
 			WHERE endpoint IN ('getusersummary', 'getusercumulate')`,
+		`CREATE VIEW IF NOT EXISTS official_article_daily_metrics AS
+			WITH reads AS (
+				SELECT
+					ref_date,
+					msgid,
+					title,
+					COALESCE(
+						json_extract(raw_json, '$.detail.read_user'),
+						json_extract(raw_json, '$.read_user')
+					) AS read_user,
+					COALESCE(
+						json_extract(raw_json, '$.detail.read_user_source'),
+						json_extract(raw_json, '$.read_user_source')
+					) AS read_user_source_json,
+					raw_json AS read_raw_json,
+					last_seen_at AS read_seen_at
+				FROM official_api_rows
+				WHERE endpoint = 'getarticleread' AND row_scope = 'item'
+			), shares AS (
+				SELECT
+					ref_date,
+					msgid,
+					title,
+					COALESCE(
+						json_extract(raw_json, '$.detail.share_user'),
+						json_extract(raw_json, '$.share_user')
+					) AS share_user,
+					raw_json AS share_raw_json,
+					last_seen_at AS share_seen_at
+				FROM official_api_rows
+				WHERE endpoint = 'getarticleshare' AND row_scope = 'item'
+			), keys AS (
+				SELECT ref_date, msgid FROM reads
+				UNION
+				SELECT ref_date, msgid FROM shares
+			)
+			SELECT
+				k.ref_date,
+				k.msgid,
+				COALESCE(NULLIF(r.title, ''), NULLIF(s.title, ''), c.title) AS title,
+				c.content_url,
+				r.read_user,
+				r.read_user_source_json,
+				s.share_user,
+				r.read_raw_json,
+				s.share_raw_json,
+				MAX(COALESCE(r.read_seen_at, 0), COALESCE(s.share_seen_at, 0)) AS last_seen_at
+			FROM keys AS k
+			LEFT JOIN reads AS r ON r.ref_date = k.ref_date AND r.msgid = k.msgid
+			LEFT JOIN shares AS s ON s.ref_date = k.ref_date AND s.msgid = k.msgid
+			LEFT JOIN official_article_catalog AS c ON c.msgid = k.msgid`,
+		`CREATE VIEW IF NOT EXISTS official_account_daily_metrics AS
+			SELECT
+				ref_date,
+				json_extract(raw_json, '$.detail.read_user') AS read_user,
+				json_extract(raw_json, '$.detail.read_user_source') AS read_user_source_json,
+				json_extract(raw_json, '$.detail.share_user') AS share_user,
+				json_extract(raw_json, '$.detail.zaikan_user') AS zaikan_user,
+				json_extract(raw_json, '$.detail.like_user') AS like_user,
+				json_extract(raw_json, '$.detail.comment_count') AS comment_count,
+				json_extract(raw_json, '$.detail.collection_user') AS collection_user,
+				json_extract(raw_json, '$.detail.redirect_ori_page_user') AS redirect_ori_page_user,
+				json_extract(raw_json, '$.detail.send_page_count') AS send_page_count,
+				raw_json,
+				last_seen_at
+			FROM official_api_rows
+			WHERE endpoint = 'getbizsummary' AND row_scope = 'item'`,
 		`CREATE VIEW IF NOT EXISTS official_article_latest_performance AS
 			WITH ranked AS (
 				SELECT
@@ -362,11 +547,22 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "official_content_articles", "article_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "official_content_articles", "message_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE official_content_articles
 		SET article_type = json_extract(raw_json, '$.article_type')
 		WHERE article_type = '' AND json_type(raw_json, '$.article_type') = 'text'`); err != nil {
 		return fmt.Errorf("backfill official article type: %w", err)
+	}
+	if err := s.backfillContentMessageIDs(ctx); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_official_content_articles_message
+		ON official_content_articles(source, message_id)`); err != nil {
+		return fmt.Errorf("create content message index: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE VIEW IF NOT EXISTS official_api_fetch_payloads AS
 		SELECT
@@ -379,6 +575,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		FROM official_api_fetches AS f
 		LEFT JOIN official_api_fetches AS original ON original.id = f.response_ref_id`); err != nil {
 		return fmt.Errorf("create API payload view: %w", err)
+	}
+	if err := s.backfillComments(ctx); err != nil {
+		return err
 	}
 	return nil
 }
@@ -547,14 +746,18 @@ func upsertContentArticle(ctx context.Context, tx *sql.Tx, source, objectID stri
 	nowMs := fetchedAt.UnixMilli()
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO official_content_articles (
-			source, object_id, article_index, article_type, title, author, digest, content_html,
+			source, object_id, article_index, article_type, message_id, title, author, digest, content_html,
 			content_source_url, url, thumb_media_id, thumb_url, is_deleted,
 			raw_json, first_seen_at, last_seen_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source, object_id, article_index) DO UPDATE SET
 			article_type = CASE
 				WHEN excluded.article_type <> '' THEN excluded.article_type
 				ELSE official_content_articles.article_type
+			END,
+			message_id = CASE
+				WHEN excluded.message_id <> '' THEN excluded.message_id
+				ELSE official_content_articles.message_id
 			END,
 			title = excluded.title,
 			author = excluded.author,
@@ -571,6 +774,7 @@ func upsertContentArticle(ctx context.Context, tx *sql.Tx, source, objectID stri
 		objectID,
 		index,
 		stringField(article, "article_type"),
+		articleMessageID(stringField(article, "url"), index),
 		stringField(article, "title"),
 		stringField(article, "author"),
 		stringField(article, "digest"),
@@ -588,6 +792,64 @@ func upsertContentArticle(ctx context.Context, tx *sql.Tx, source, objectID stri
 		return fmt.Errorf("upsert %s article: %w", source, err)
 	}
 	return nil
+}
+
+func (s *Store) backfillContentMessageIDs(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source, object_id, article_index, url
+		FROM official_content_articles
+		WHERE message_id = '' AND url <> ''`)
+	if err != nil {
+		return err
+	}
+	type update struct {
+		source, objectID, messageID string
+		articleIndex                int
+	}
+	var updates []update
+	for rows.Next() {
+		var item update
+		var rawURL string
+		if err := rows.Scan(&item.source, &item.objectID, &item.articleIndex, &rawURL); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		item.messageID = articleMessageID(rawURL, item.articleIndex)
+		if item.messageID != "" {
+			updates = append(updates, item)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range updates {
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE official_content_articles SET message_id = ?
+			WHERE source = ? AND object_id = ? AND article_index = ?`,
+			item.messageID, item.source, item.objectID, item.articleIndex); err != nil {
+			return fmt.Errorf("backfill content message id: %w", err)
+		}
+	}
+	return nil
+}
+
+func articleMessageID(rawURL string, fallbackIndex int) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	mid := strings.TrimSpace(parsed.Query().Get("mid"))
+	if mid == "" {
+		return ""
+	}
+	index := strings.TrimSpace(parsed.Query().Get("idx"))
+	if index == "" && fallbackIndex >= 0 {
+		index = strconv.Itoa(fallbackIndex + 1)
+	}
+	if index == "" {
+		return ""
+	}
+	return mid + "_" + index
 }
 
 func (s *Store) ListObjectsNeedingDetail(ctx context.Context, source string, limit int) ([]string, error) {
@@ -828,11 +1090,132 @@ func (s *Store) SaveFetch(ctx context.Context, record FetchRecord) (int64, error
 		if err := upsertResponseRows(ctx, tx, record); err != nil {
 			return 0, err
 		}
+		if record.Endpoint == "comment_list" {
+			if err := upsertComments(ctx, tx, record); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+func upsertComments(ctx context.Context, tx *sql.Tx, record FetchRecord) error {
+	var request struct {
+		MsgDataID string `json:"msg_data_id"`
+		Index     int    `json:"index"`
+	}
+	if err := json.Unmarshal(record.RequestJSON, &request); err != nil {
+		return fmt.Errorf("decode comment request: %w", err)
+	}
+	var response struct {
+		Comments []json.RawMessage `json:"comment"`
+	}
+	if err := json.Unmarshal(record.ResponseJSON, &response); err != nil {
+		return fmt.Errorf("decode comment response: %w", err)
+	}
+	nowMs := record.FetchedAt.UnixMilli()
+	for index, raw := range response.Comments {
+		var comment map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &comment); err != nil {
+			return fmt.Errorf("decode comment row: %w", err)
+		}
+		commentID := stringField(comment, "user_comment_id")
+		identity := request.MsgDataID + "|" + strconv.Itoa(request.Index) + "|" + commentID
+		if commentID == "" {
+			hash := sha256.Sum256(append([]byte(identity+"|"+strconv.Itoa(index)+"|"), raw...))
+			identity = hex.EncodeToString(hash[:])
+		}
+		var reply map[string]json.RawMessage
+		_ = json.Unmarshal(comment["reply"], &reply)
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO official_comments (
+				row_key, msg_data_id, article_index, user_comment_id, create_time,
+				content, comment_type, openid, reply_content, reply_create_time,
+				raw_json, first_seen_at, last_seen_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(row_key) DO UPDATE SET
+				create_time = excluded.create_time,
+				content = excluded.content,
+				comment_type = excluded.comment_type,
+				openid = excluded.openid,
+				reply_content = excluded.reply_content,
+				reply_create_time = excluded.reply_create_time,
+				raw_json = excluded.raw_json,
+				last_seen_at = excluded.last_seen_at`,
+			identity,
+			request.MsgDataID,
+			request.Index,
+			commentID,
+			int64Field(comment, "create_time"),
+			stringField(comment, "content"),
+			int64Field(comment, "comment_type"),
+			stringField(comment, "openid"),
+			stringField(reply, "content"),
+			int64Field(reply, "create_time"),
+			string(raw),
+			nowMs,
+			nowMs,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert comment %s: %w", identity, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) backfillComments(ctx context.Context) error {
+	type archivedCommentResponse struct {
+		request  []byte
+		response []byte
+		fetched  int64
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT f.request_json, COALESCE(f.response_json, original.response_json), f.fetched_at
+		FROM official_api_fetches AS f
+		LEFT JOIN official_api_fetches AS original ON original.id = f.response_ref_id
+		WHERE f.endpoint = 'comment_list' AND f.success = 1
+			AND COALESCE(f.response_json, original.response_json) IS NOT NULL
+		ORDER BY f.id`)
+	if err != nil {
+		return fmt.Errorf("read archived comments: %w", err)
+	}
+	archived := make([]archivedCommentResponse, 0)
+	for rows.Next() {
+		var item archivedCommentResponse
+		if err := rows.Scan(&item.request, &item.response, &item.fetched); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		archived = append(archived, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(archived) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, item := range archived {
+		if err := upsertComments(ctx, tx, FetchRecord{
+			Endpoint:     "comment_list",
+			RequestJSON:  item.request,
+			ResponseJSON: item.response,
+			FetchedAt:    time.UnixMilli(item.fetched),
+		}); err != nil {
+			return fmt.Errorf("backfill archived comments: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit archived comments: %w", err)
+	}
+	return nil
 }
 
 func upsertResponseRows(ctx context.Context, tx *sql.Tx, record FetchRecord) error {

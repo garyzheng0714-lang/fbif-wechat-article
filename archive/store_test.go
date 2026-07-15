@@ -2,9 +2,79 @@ package archive
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestOpenMigratesLegacyContentArticlesBeforeBaseViewsAreUsed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE official_content_articles (
+		source TEXT NOT NULL,
+		object_id TEXT NOT NULL,
+		article_index INTEGER NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		author TEXT NOT NULL DEFAULT '',
+		digest TEXT NOT NULL DEFAULT '',
+		content_html TEXT NOT NULL DEFAULT '',
+		content_source_url TEXT NOT NULL DEFAULT '',
+		url TEXT NOT NULL DEFAULT '',
+		thumb_media_id TEXT NOT NULL DEFAULT '',
+		thumb_url TEXT NOT NULL DEFAULT '',
+		is_deleted INTEGER NOT NULL DEFAULT 0,
+		raw_json TEXT NOT NULL,
+		first_seen_at INTEGER NOT NULL,
+		last_seen_at INTEGER NOT NULL,
+		PRIMARY KEY(source, object_id, article_index)
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE VIEW official_article_publications AS SELECT 'legacy' AS old_column`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO official_content_articles (
+		source, object_id, article_index, title, url, raw_json, first_seen_at, last_seen_at
+	) VALUES ('freepublish', 'legacy-1', 0, '旧文章',
+		'https://mp.weixin.qq.com/s?mid=42&idx=1',
+		'{"article_type":"news"}', 1, 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var articleType, messageID string
+	if err := store.db.QueryRow(`SELECT article_type, message_id FROM official_content_articles
+		WHERE source = 'freepublish' AND object_id = 'legacy-1'`).Scan(&articleType, &messageID); err != nil {
+		t.Fatal(err)
+	}
+	if articleType != "news" || messageID != "42_1" {
+		t.Fatalf("legacy migration article_type=%q message_id=%q", articleType, messageID)
+	}
+	columns, err := store.QueryInt64(context.Background(), `
+		SELECT COUNT(*) FROM pragma_table_info('official_article_publications')
+		WHERE name = 'publication_raw_json'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if columns != 1 {
+		t.Fatal("legacy analytics view was not refreshed")
+	}
+}
 
 func TestSaveFetchPreservesRawAndNormalizesArticleMetrics(t *testing.T) {
 	store, err := Open(":memory:")
@@ -86,14 +156,20 @@ func TestOfficialArticleAndFollowerViewsJoinOfficialTables(t *testing.T) {
 
 	for _, response := range []struct {
 		endpoint string
+		category string
 		body     []byte
 	}{
-		{"getusersummary", []byte(`{"list":[{"ref_date":"2026-07-02","user_source":57,"new_user":12,"cancel_user":3}]}`)},
-		{"getusercumulate", []byte(`{"list":[{"ref_date":"2026-07-02","cumulate_user":1000}]}`)},
+		{"getarticleread", "article", []byte(`{"list":[{"ref_date":"2026-07-02","msgid":"42_2","detail":{"read_user":7,"read_user_source":[{"user_count":7,"scene_desc":"全部"}]}}]}`)},
+		{"getarticleshare", "article", []byte(`{"list":[{"ref_date":"2026-07-02","msgid":"42_2","detail":{"share_user":2}}]}`)},
+		{"getbizsummary", "article", []byte(`{"list":[{"ref_date":"2026-07-02","detail":{"read_user":70,"share_user":20,"send_page_count":3}}]}`)},
+		{"getusersummary", "user", []byte(`{"list":[{"ref_date":"2026-07-02","user_source":57,"new_user":12,"cancel_user":3}]}`)},
+		{"getusercumulate", "user", []byte(`{"list":[{"ref_date":"2026-07-02","cumulate_user":1000}]}`)},
+		{"getupstreammsg", "message", []byte(`{"list":[{"ref_date":"2026-07-02","user_source":0,"msg_type":1,"msg_user":4,"msg_count":8}]}`)},
+		{"getinterfacesummary", "interface", []byte(`{"list":[{"ref_date":"2026-07-02","callback_count":20,"fail_count":1,"total_time_cost":80,"max_time_cost":12}]}`)},
 	} {
 		if _, err := store.SaveFetch(context.Background(), FetchRecord{
 			Endpoint:     response.endpoint,
-			Category:     "user",
+			Category:     response.category,
 			BeginDate:    "2026-07-02",
 			EndDate:      "2026-07-02",
 			ResponseJSON: response.body,
@@ -135,6 +211,146 @@ func TestOfficialArticleAndFollowerViewsJoinOfficialTables(t *testing.T) {
 	}
 	if netNew != 9 || cumulate != 1000 {
 		t.Fatalf("follower metrics net=%d cumulate=%d", netNew, cumulate)
+	}
+
+	articleRows, err := store.ListBaseSyncCandidates(context.Background(), BaseDatasetArticles, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(articleRows) != 1 || articleRows[0].RowKey != "42_2" || articleRows[0].Fields["文章ID"] != "article-42" {
+		t.Fatalf("article Base rows = %+v", articleRows)
+	}
+	if err := store.SaveBaseRecord(context.Background(), BaseDatasetArticles, "42_2", "rec-42", "hash", articleRows[0].SourceSeenAt, fetchedAt); err != nil {
+		t.Fatal(err)
+	}
+	articleRows, err = store.ListBaseSyncCandidates(context.Background(), BaseDatasetArticles, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(articleRows) != 0 {
+		t.Fatalf("already synced article rows = %d, want 0", len(articleRows))
+	}
+
+	for _, dataset := range []string{
+		BaseDatasetArticleDaily,
+		BaseDatasetArticleCumulative,
+		BaseDatasetAccountDaily,
+		BaseDatasetFollowerSource,
+		BaseDatasetFollowerCumulative,
+		BaseDatasetMessageMetrics,
+		BaseDatasetInterfaceMetrics,
+		BaseDatasetContentAssets,
+		BaseDatasetContentArticles,
+		BaseDatasetSyncStatus,
+	} {
+		rows, err := store.ListBaseSyncCandidates(context.Background(), dataset, 10)
+		if err != nil {
+			t.Fatalf("%s: %v", dataset, err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s rows = %d, want 1", dataset, len(rows))
+		}
+	}
+	apiRows, err := store.ListBaseSyncCandidates(context.Background(), BaseDatasetAPIFetches, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apiRows) < 8 {
+		t.Fatalf("API fetch Base rows = %d, want every archived call", len(apiRows))
+	}
+}
+
+func TestCommentResponsePreservesEveryFieldAndCreatesBaseFact(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Unix(100, 0)
+	if _, err := store.SaveFetch(context.Background(), FetchRecord{
+		Endpoint:     "comment_list",
+		Category:     "comment",
+		RequestJSON:  []byte(`{"msg_data_id":"42","index":1,"begin":0,"count":49,"type":0}`),
+		ResponseJSON: []byte(`{"errcode":0,"errmsg":"ok","total":1,"comment":[{"user_comment_id":7,"create_time":90,"content":"完整评论","comment_type":1,"openid":"openid-1","reply":{"content":"完整回复","create_time":95},"future_field":{"keep":true}}]}`),
+		Success:      true,
+		FetchedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var content, reply, raw string
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT content, reply_content, raw_json FROM official_comments
+		WHERE row_key = '42|1|7'`).Scan(&content, &reply, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if content != "完整评论" || reply != "完整回复" || !strings.Contains(raw, `"future_field":{"keep":true}`) {
+		t.Fatalf("comment content=%q reply=%q raw=%q", content, reply, raw)
+	}
+	candidates, err := store.ListBaseSyncCandidates(context.Background(), BaseDatasetComments, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].Fields["评论者OpenID"] != "openid-1" {
+		t.Fatalf("comment Base candidates = %+v", candidates)
+	}
+}
+
+func TestOpenBackfillsCommentsFromArchivedRawResponses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "comments.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.db.Exec(`INSERT INTO official_api_fetches (
+		endpoint, category, request_json, response_json, response_sha256,
+		success, fetched_at
+	) VALUES ('comment_list', 'comment', ?, ?, 'hash', 1, 100000)`,
+		`{"msg_data_id":"99","index":0}`,
+		`{"comment":[{"user_comment_id":3,"content":"历史评论"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	count, err := store.QueryInt64(context.Background(), `
+		SELECT COUNT(*) FROM official_comments WHERE row_key = '99|0|3' AND content = '历史评论'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("backfilled comments = %d, want 1", count)
+	}
+}
+
+func TestBaseUnresolvedRecordsForceRemoteReconciliation(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.MarkBaseRecordError(ctx, BaseDatasetArticles, "42_1", fmt.Errorf("partial batch failure")); err != nil {
+		t.Fatal(err)
+	}
+	unresolved, err := store.BaseUnresolvedRecordCount(ctx, BaseDatasetArticles)
+	if err != nil || unresolved != 1 {
+		t.Fatalf("unresolved=%d err=%v", unresolved, err)
+	}
+	if err := store.SeedBaseRecord(ctx, BaseDatasetArticles, "42_1", "rec-42"); err != nil {
+		t.Fatal(err)
+	}
+	unresolved, err = store.BaseUnresolvedRecordCount(ctx, BaseDatasetArticles)
+	if err != nil || unresolved != 0 {
+		t.Fatalf("reconciled unresolved=%d err=%v", unresolved, err)
 	}
 }
 

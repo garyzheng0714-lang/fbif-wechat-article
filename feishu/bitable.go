@@ -339,6 +339,48 @@ func BatchCreateByRecordFields(tableID string, records []map[string]interface{})
 	return nil
 }
 
+// BatchCreateByRecordFieldsWithIDs creates records and returns their Feishu
+// record IDs in request order. Official-data Base sync uses these IDs for
+// incremental updates instead of re-reading an entire fact table every run.
+func BatchCreateByRecordFieldsWithIDs(tableID string, records []map[string]interface{}) ([]string, error) {
+	batchSize := recordWriteBatchSize()
+	recordIDs := make([]string, 0, len(records))
+	for i := 0; i < len(records); i += batchSize {
+		end := i + batchSize
+		if end > len(records) {
+			end = len(records)
+		}
+		batch := records[i:end]
+		recordWriteMu.Lock()
+		data, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
+			"records": batch,
+		}, tableID)
+		recordWriteMu.Unlock()
+		if err != nil {
+			return recordIDs, fmt.Errorf("batch create with IDs (offset %d): %w", i, err)
+		}
+		var result struct {
+			Records []struct {
+				RecordID string `json:"record_id"`
+			} `json:"records"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return recordIDs, fmt.Errorf("parse batch create response (offset %d): %w", i, err)
+		}
+		if len(result.Records) != len(batch) {
+			return recordIDs, fmt.Errorf("batch create response (offset %d) returned %d record IDs for %d records", i, len(result.Records), len(batch))
+		}
+		for _, record := range result.Records {
+			if record.RecordID == "" {
+				return recordIDs, fmt.Errorf("batch create response (offset %d) contains an empty record ID", i)
+			}
+			recordIDs = append(recordIDs, record.RecordID)
+		}
+		log.Printf("[Feishu] Batch created %d records with IDs (%d/%d)", len(batch), len(recordIDs), len(records))
+	}
+	return recordIDs, nil
+}
+
 func ListRecords(tableID string, fieldNames []string) ([]Record, error) {
 	var records []Record
 	pageToken := ""

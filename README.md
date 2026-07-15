@@ -129,6 +129,13 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `ENABLE_OFFICIAL_API_COLLECTOR`，默认开启
 - `ENABLE_FEISHU_SYNC`，默认开启；只运行官方归档时可设为 `0`
 
+官方数据写回 Base（显式开启）：
+
+- `ENABLE_OFFICIAL_BASE_SYNC=1`
+- `OFFICIAL_BASE_SYNC_INTERVAL_MINUTES`，默认 `5`
+- `OFFICIAL_BASE_SYNC_ROWS_PER_DATASET`，默认每轮每张表 `500`
+- `OFFICIAL_BASE_SYNC_INITIAL_DELAY_SECONDS`，默认 `20`
+
 自动排版（显式开启）：
 
 - `ENABLE_AUTO_LAYOUT=1`
@@ -185,6 +192,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 | --- | --- | --- | --- |
 | `GET` | `/health` | 健康检查，返回 token 状态和 cursor 摘要。 | 不需要 |
 | `POST` | `/api/feishu/sync` | 手动触发一次同步。 | `API_KEY` |
+| `POST` | `/api/feishu/official-sync` | 手动触发一次全部官方归档数据到 Base 的增量同步。 | `API_KEY` |
 | `GET` | `/api/feishu/cursor` | 查看同步进度 cursor。 | `API_KEY` |
 | `GET` | `/api/wechat/official/status` | 查看 15 个现役接口、6 个下线接口、回填游标和存储统计。 | `API_KEY` |
 | `GET` | `/api/wechat/official/endpoints` | 查看全部数据与内容接口清单、生命周期和必填标识符。 | `API_KEY` |
@@ -209,6 +217,14 @@ X-API-Key: <token>
 - 官方窗口限制按接口独立执行：`freepublish/batchget` 每页 1–20 个发布对象；新版文章阅读、分享、发表详情从 `2025-11-01` 起提供且查询结束日最多为昨日，其中阅读/分享每次 1 天、发表详情每篇只统计发表后 30 天；用户增减与累计数据从 `2014-12-01` 起提供，用户增减按来源记录，账号净增不得直接归因给单篇文章。
 - 每次请求和响应都留档。相同请求得到完全相同的响应时，后续记录引用第一份原始字节，避免重复正文写满磁盘。
 - 可用 `./wechat-sync collect-once` 做一次性采集和服务器验收。
+
+### 官方数据写回多维表格
+
+- `ENABLE_OFFICIAL_BASE_SYNC=1` 时，每隔 `OFFICIAL_BASE_SYNC_INTERVAL_MINUTES` 分钟把 SQLite 中已归档的官方数据增量写回 `FEISHU_BITABLE_APP_TOKEN`。
+- 自动维护 13 张可关联的仪表盘数据表：`文章主档`、`文章每日指标`、`文章累计指标`、`账号内容日报`、`粉丝来源日报`、`粉丝累计日报`、`消息互动指标`、`接口性能指标`、`内容资产主档`、`内容条目主档`、`文章评论`、`API调用日志`、`接口同步状态`。
+- 每条记录使用官方 `msgid`、日期和来源维度组成稳定唯一键；本地保存 Base `record_id` 与 payload hash，只同步新增或变化的记录，不在每轮扫描后全表重写。
+- 所有已知官方字段结构化写入，嵌套数组与未知新增字段同时保留在原始 JSON 字段；每一次官方 API 调用的请求、响应、状态码、错误码、响应哈希和原始 JSON 也单独入表。Base 单个文本单元格超过平台上限时会写入带 SHA-256 的可追踪截断值，二进制响应在 Base 记录类型与字节数，SQLite 始终保留完整原始字节。
+- 新发布正文按轮询间隔同步；微信文章与粉丝统计接口的结束日期最大为昨日，因此指标在官方提供后立即同步，不能伪造成同日实时数据。
 
 ### 自动排版
 

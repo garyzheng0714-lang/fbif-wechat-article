@@ -268,11 +268,8 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 		}
 
 		for {
-			now := time.Now().In(wechat.ShanghaiLoc())
-			next := time.Date(now.Year(), now.Month(), now.Day(), 8, 30, 0, 0, wechat.ShanghaiLoc())
-			if !next.After(now) {
-				next = next.AddDate(0, 0, 1)
-			}
+			now := time.Now()
+			next := nextScheduledCollection(now)
 			timer.Reset(next.Sub(now))
 			log.Printf("[OfficialCollector] Next run at %s", next.Format("2006-01-02 15:04:05"))
 			select {
@@ -285,6 +282,15 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 			}
 		}
 	}()
+}
+
+func nextScheduledCollection(now time.Time) time.Time {
+	localNow := now.In(wechat.ShanghaiLoc())
+	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 5, 0, 0, wechat.ShanghaiLoc())
+	if !next.After(localNow) {
+		next = next.AddDate(0, 0, 1)
+	}
+	return next
 }
 
 func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {

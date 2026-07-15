@@ -22,10 +22,10 @@
 - 采集文章阅读、分享、在看、点赞、评论、收藏、赞赏、阅读完成率、阅读来源，以及粉丝新增、取关、净增和累计数据。
 - 自动内容归档只遍历 `freepublish/batchget` 已发布文章，并逐篇调用 `freepublish/getarticle` 保存详情接口全部字段；草稿最新页只用于读取 `article_type`，素材库不参与历史同步。
 - 所有响应先按原始字节写入 SQLite，再生成可查询的文章指标行；微信新增字段无需改结构即可留存。
-- 每天 `08:30` 先抓昨天及最近 30 天仍会变化的数据，再在保留每日 2% 官方额度后，从新到旧断点回填；额度按上海时区自然日自动刷新。
+- 每天 `00:05` 在上海时区额度刷新后立即抓昨天及最近 30 天仍会变化的数据，再在保留每日 2% 官方额度后，从新到旧断点回填。
 - 可每 `15` 分钟先轮询官方 `draft/batchget` 保留文章类型，再轮询 `freepublish/batchget`：只有官方确认为普通图文 `article_type=news` 的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
 - 已发布文章、文章指标、粉丝指标、评论和同步状态先完整落 SQLite；Base 同步显式开启后再批量增量写入。
-- 启动后自动执行一次同步，并由内置 scheduler 每天 `09:00` 再次同步。
+- 官方 API 采集器启动后自动执行一次，此后每天 `00:05` 再次执行；旧直连飞书 scheduler 已停用。
 - 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
 - 媒体 worker 可后台补齐封面图链接和正文图片链接。
 - 图片可优先转存到阿里云 OSS；未配置 OSS 时回退到本地 `/media/` 静态目录。
@@ -216,7 +216,7 @@ X-API-Key: <token>
 
 ### 官方 API 采集
 
-- 服务启动后自动采集一次，此后每天北京时间 `08:30` 执行。
+- 服务启动后自动采集一次，此后每天北京时间 `00:05` 执行。
 - `ready` 只表示采集服务与当前接口可运行，绝不表示历史文章全量已核验；历史口径只看 `historicalCoverage.verified`。
 - `getarticletotaldetail` 会重复刷新最近 30 个发表日；其他接口按官方最大跨度拆分并断点回填。
 - 正文、身份与指标分表保存：`official_content_articles` 保存发布正文；`official_article_publications` 用 `msgid=msg_data_id_index` 保存文章身份；`official_article_metric_facts` 关联阅读、分享、阅读后关注等文章事实；`official_follower_metric_facts` 保存账号新增、取关、净增和累计粉丝。`official_article_catalog` 通过官方 `content_url` 关联正文，`official_article_latest_performance` 提供每篇文章最新累计表现。

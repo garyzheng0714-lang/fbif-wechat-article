@@ -33,3 +33,17 @@ func TestQuotaAwareCallBudgetWithoutLayoutUsesAllUsableQuota(t *testing.T) {
 		t.Fatalf("budget=%d reserve=%d, want 815/0", budget, reserve)
 	}
 }
+
+func TestNextScheduledCollectionStartsShortlyAfterQuotaRefresh(t *testing.T) {
+	before := time.Date(2026, 7, 15, 0, 4, 59, 0, wechat.ShanghaiLoc())
+	wantToday := time.Date(2026, 7, 15, 0, 5, 0, 0, wechat.ShanghaiLoc())
+	if got := nextScheduledCollection(before); !got.Equal(wantToday) {
+		t.Fatalf("before 00:05 got %s, want %s", got, wantToday)
+	}
+
+	after := time.Date(2026, 7, 15, 0, 5, 0, 0, wechat.ShanghaiLoc())
+	wantTomorrow := time.Date(2026, 7, 16, 0, 5, 0, 0, wechat.ShanghaiLoc())
+	if got := nextScheduledCollection(after); !got.Equal(wantTomorrow) {
+		t.Fatalf("at 00:05 got %s, want %s", got, wantTomorrow)
+	}
+}

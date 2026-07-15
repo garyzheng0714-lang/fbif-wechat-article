@@ -16,12 +16,7 @@ func TestDatasetRegistryCoversEveryArchivedDomain(t *testing.T) {
 		archive.BaseDatasetAccountDaily:       true,
 		archive.BaseDatasetFollowerSource:     true,
 		archive.BaseDatasetFollowerCumulative: true,
-		archive.BaseDatasetMessageMetrics:     true,
-		archive.BaseDatasetInterfaceMetrics:   true,
-		archive.BaseDatasetContentAssets:      true,
-		archive.BaseDatasetContentArticles:    true,
 		archive.BaseDatasetComments:           true,
-		archive.BaseDatasetAPIFetches:         true,
 		archive.BaseDatasetSyncStatus:         true,
 	}
 	for _, dataset := range datasets {

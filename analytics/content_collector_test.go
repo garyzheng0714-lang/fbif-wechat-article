@@ -49,7 +49,27 @@ func (f *fakeContentClient) Call(_ context.Context, endpoint wechat.ContentEndpo
 	}, nil
 }
 
-func TestContentCollectorCallsAllInventoryAndDetailInterfaces(t *testing.T) {
+type orderedPublishedClient struct {
+	detailIDs []string
+}
+
+func (f *orderedPublishedClient) Call(_ context.Context, endpoint wechat.ContentEndpoint, payload interface{}) (*wechat.RawAPIResponse, error) {
+	request, _ := json.Marshal(payload)
+	body := []byte(`{"errcode":0,"errmsg":"ok"}`)
+	switch endpoint.Name {
+	case "draft_batchget":
+		body = []byte(`{"total_count":0,"item_count":0,"item":[]}`)
+	case "freepublish_batchget":
+		body = []byte(`{"total_count":3,"item_count":3,"item":[{"article_id":"newest","update_time":300,"content":{"news_item":[{"title":"newest","content":"<p>newest</p>","url":"https://mp.weixin.qq.com/s/newest"}]}},{"article_id":"middle","update_time":200,"content":{"news_item":[{"title":"middle","content":"<p>middle</p>","url":"https://mp.weixin.qq.com/s/middle"}]}},{"article_id":"oldest","update_time":100,"content":{"news_item":[{"title":"oldest","content":"<p>oldest</p>","url":"https://mp.weixin.qq.com/s/oldest"}]}}]}`)
+	case "freepublish_getarticle":
+		values, _ := payload.(map[string]string)
+		f.detailIDs = append(f.detailIDs, values["article_id"])
+		body = []byte(`{"news_item":[{"title":"detail","future_field":{"kept":true}}]}`)
+	}
+	return &wechat.RawAPIResponse{Endpoint: endpoint.Name, RequestBody: request, Body: body, HTTPStatus: 200}, nil
+}
+
+func TestContentCollectorArchivesOnlyPublishedInventoryAndLatestDraftType(t *testing.T) {
 	store, err := archive.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -69,21 +89,25 @@ func TestContentCollectorCallsAllInventoryAndDetailInterfaces(t *testing.T) {
 	if result.Failed != 0 {
 		t.Fatalf("result = %+v", result)
 	}
-	want := []string{
-		"draft_count", "material_get_materialcount", "draft_batchget",
-		"freepublish_batchget", "material_batchget_material", "draft_get",
-		"freepublish_getarticle", "material_get_material",
-	}
+	want := []string{"draft_batchget", "freepublish_batchget", "freepublish_getarticle"}
 	for _, name := range want {
 		if !containsString(client.calls, name) {
 			t.Fatalf("%s was not called; calls=%v", name, client.calls)
+		}
+	}
+	for _, name := range []string{
+		"draft_count", "draft_get", "material_get_materialcount",
+		"material_batchget_material", "material_get_material",
+	} {
+		if containsString(client.calls, name) {
+			t.Fatalf("%s is outside the published-article archive scope; calls=%v", name, client.calls)
 		}
 	}
 	articles, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if articles < 3 {
+	if articles != 2 {
 		t.Fatalf("articles = %d", articles)
 	}
 	fetches, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_api_fetches`)
@@ -122,6 +146,31 @@ func TestRefreshPublishedCapturesDraftTypeBeforePublishedPage(t *testing.T) {
 	typed, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'draft' AND article_type = 'news'`)
 	if err != nil || typed != 1 {
 		t.Fatalf("official draft article_type not persisted: typed=%d err=%v", typed, err)
+	}
+}
+
+func TestContentCollectorFetchesEveryPublishedDetailNewestToOldest(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client := &orderedPublishedClient{}
+	collector := &ContentCollector{Client: client, Store: store, MaxCalls: 10}
+	result, err := collector.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"newest", "middle", "oldest"}
+	if fmt.Sprint(client.detailIDs) != fmt.Sprint(want) {
+		t.Fatalf("detail order=%v want=%v", client.detailIDs, want)
+	}
+	if result.Calls != 5 {
+		t.Fatalf("calls=%d want draft page + published page + 3 details", result.Calls)
+	}
+	pending, err := store.ListObjectsNeedingDetail(context.Background(), "freepublish", 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("published details not complete: pending=%v err=%v", pending, err)
 	}
 }
 

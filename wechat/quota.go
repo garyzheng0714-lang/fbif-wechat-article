@@ -3,6 +3,7 @@ package wechat
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +14,14 @@ import (
 type dailyQuotaState struct {
 	Date  string `json:"date"`
 	Count int    `json:"count"`
+}
+
+type DailyQuotaStatus struct {
+	Date            string `json:"date"`
+	Limit           int    `json:"limit"`
+	Reserve         int    `json:"reserve"`
+	Used            int    `json:"used"`
+	UsableRemaining int    `json:"usableRemaining"`
 }
 
 type QuotaLimitError struct {
@@ -59,12 +68,41 @@ func dailyQuotaLimit() int {
 }
 
 func dailyQuotaReserve() int {
+	if v := os.Getenv("WECHAT_DAILY_QUOTA_RESERVE_PERCENT"); v != "" {
+		if percent, err := strconv.ParseFloat(v, 64); err == nil && percent >= 0 && percent < 100 {
+			return int(math.Ceil(float64(dailyQuotaLimit()) * percent / 100))
+		}
+	}
 	if v := os.Getenv("WECHAT_DAILY_QUOTA_RESERVE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
 		}
 	}
-	return 0
+	return int(math.Ceil(float64(dailyQuotaLimit()) * 0.02))
+}
+
+// CurrentDailyQuotaStatus 返回本进程与同一工作目录中的持久计数快照，不消耗额度。
+// UsableRemaining 已扣除硬保留额度，供历史回填调度继续预留当天常规轮询。
+func CurrentDailyQuotaStatus() DailyQuotaStatus {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today := time.Now().In(ShanghaiLoc()).Format("2006-01-02")
+	if quotaCache == nil || quotaCache.Date != today {
+		quotaCache = loadQuota(today)
+	}
+	limit := dailyQuotaLimit()
+	reserve := dailyQuotaReserve()
+	usableRemaining := limit - reserve - quotaCache.Count
+	if usableRemaining < 0 {
+		usableRemaining = 0
+	}
+	return DailyQuotaStatus{
+		Date:            today,
+		Limit:           limit,
+		Reserve:         reserve,
+		Used:            quotaCache.Count,
+		UsableRemaining: usableRemaining,
+	}
 }
 
 // checkAndIncrementQuota checks the daily quota and increments the counter.

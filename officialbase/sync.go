@@ -88,48 +88,6 @@ var datasets = []Dataset{
 		),
 	},
 	{
-		Key:          archive.BaseDatasetMessageMetrics,
-		TableName:    "消息互动指标",
-		PrimaryField: "唯一键",
-		Fields: fields(
-			text("唯一键"), text("接口"), text("统计粒度"), datetime("统计日期"), number("统计小时"),
-			number("用户来源代码"), number("消息类型代码"), text("消息类型"), number("消息数量区间"),
-			number("上行消息人数"), number("上行消息条数"), text("维度JSON"), text("原始JSON"),
-			datetime("首次获取时间"), datetime("来源更新时间"),
-		),
-	},
-	{
-		Key:          archive.BaseDatasetInterfaceMetrics,
-		TableName:    "接口性能指标",
-		PrimaryField: "唯一键",
-		Fields: fields(
-			text("唯一键"), text("接口"), text("统计粒度"), datetime("统计日期"), number("统计小时"),
-			number("回调次数"), number("失败次数"), number("总耗时毫秒"), number("最大耗时毫秒"),
-			text("维度JSON"), text("原始JSON"), datetime("首次获取时间"), datetime("来源更新时间"),
-		),
-	},
-	{
-		Key:          archive.BaseDatasetContentAssets,
-		TableName:    "内容资产主档",
-		PrimaryField: "唯一键",
-		Fields: fields(
-			text("唯一键"), text("内容来源"), text("对象ID"), datetime("内容更新时间"), text("列表原始JSON"),
-			text("详情类型"), number("详情字节数"), text("详情原始JSON"), datetime("详情获取时间"),
-			datetime("首次获取时间"), datetime("来源更新时间"),
-		),
-	},
-	{
-		Key:          archive.BaseDatasetContentArticles,
-		TableName:    "内容条目主档",
-		PrimaryField: "唯一键",
-		Fields: fields(
-			text("唯一键"), text("内容来源"), text("对象ID"), number("条目位置"), text("文章类型"), text("消息ID"),
-			text("文章标题"), text("作者"), text("摘要"), text("正文HTML"), urlField("原文链接"), urlField("文章链接"),
-			text("封面素材ID"), urlField("封面图链接"), number("是否删除"), text("原始JSON"),
-			datetime("首次获取时间"), datetime("来源更新时间"),
-		),
-	},
-	{
 		Key:          archive.BaseDatasetComments,
 		TableName:    "文章评论",
 		PrimaryField: "唯一键",
@@ -140,22 +98,11 @@ var datasets = []Dataset{
 		),
 	},
 	{
-		Key:          archive.BaseDatasetAPIFetches,
-		TableName:    "API调用日志",
-		PrimaryField: "唯一键",
-		Fields: fields(
-			text("唯一键"), number("调用ID"), text("接口"), text("分类"), text("开始日期"), text("结束日期"),
-			text("请求JSON"), text("响应SHA256"), number("响应引用ID"), number("HTTP状态码"), number("微信错误码"),
-			text("微信错误信息"), number("是否成功"), text("内部错误"), text("响应类型"), number("响应字节数"),
-			text("响应原始JSON"), datetime("调用时间"),
-		),
-	},
-	{
 		Key:          archive.BaseDatasetSyncStatus,
 		TableName:    "接口同步状态",
 		PrimaryField: "唯一键",
 		Fields: fields(
-			text("唯一键"), text("数据集"), text("类型"), text("分类"), text("下次回填位置"), number("总数"),
+			text("唯一键"), text("数据集"), text("类型"), text("分类"), text("回填方向"), text("下次回填位置"), number("总数"),
 			number("是否完成"), datetime("最后成功时间"), text("最后错误"), number("连续失败次数"), datetime("状态更新时间"),
 		),
 	},

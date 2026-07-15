@@ -98,15 +98,21 @@ func TestRunAdvancesBackfillOnlyAfterDurableSuccess(t *testing.T) {
 	if result.Calls != 2 {
 		t.Fatalf("calls = %d", result.Calls)
 	}
-	if client.calls[1] != (wechat.DateWindow{Begin: "2014-12-01", End: "2014-12-07"}) {
+	if client.calls[1] != (wechat.DateWindow{Begin: "2026-07-06", End: "2026-07-12"}) {
 		t.Fatalf("backfill window = %+v", client.calls[1])
 	}
 	state, err := store.GetState(context.Background(), endpoint.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.NextBackfillDate != "2014-12-08" {
+	if state.NextBackfillDate != "2026-07-05" || state.BackfillDirection != "newest_to_oldest" || state.BackfillComplete {
 		t.Fatalf("state = %+v", state)
+	}
+	if _, err := collector.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.calls[3] != (wechat.DateWindow{Begin: "2026-06-29", End: "2026-07-05"}) {
+		t.Fatalf("second backfill window = %+v", client.calls[3])
 	}
 }
 

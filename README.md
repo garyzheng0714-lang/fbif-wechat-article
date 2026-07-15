@@ -5,7 +5,7 @@
 ![状态：维护中](https://img.shields.io/badge/%E7%8A%B6%E6%80%81-%E7%BB%B4%E6%8A%A4%E4%B8%AD-2ea44f)
 ![README：中文](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-d73a49)
 
-`fbif-wechat-article` 是一个只使用微信公众号官方 API 的归档与数据采集服务。它完整保存素材、草稿、发表记录、文章详情和数据分析响应，并可把官方发表正文自动送入排版待审流程或继续同步到飞书多维表格。
+`fbif-wechat-article` 是一个只使用微信公众号官方 API 的归档与数据采集服务。默认自动归档已发布文章、文章指标和粉丝指标，并可把普通图文送入排版待审流程，或在本地数据完整后批量同步到飞书多维表格。
 
 ## 仓库定位
 
@@ -17,16 +17,15 @@
 
 - 使用微信公众号 `freepublish/batchget` 接口同步已发布文章。
 - 覆盖微信文档中的 21 个数据接口：15 个现役接口每日采集，6 个已下线旧接口保留一次 `47009` 官方响应和替代接口说明。
-- 采集文章阅读、分享、在看、点赞、评论、收藏、赞赏、阅读完成率、阅读来源，以及用户、消息和接口分析数据。
-- 覆盖素材、草稿、发表记录、文章详情、评论、群发/发布状态等 11 个内容侧读取接口；需要 `publish_id` 或 `msg_id` 的状态接口通过受保护的手动调用入口执行。
+- 采集文章阅读、分享、在看、点赞、评论、收藏、赞赏、阅读完成率、阅读来源，以及粉丝新增、取关、净增和累计数据。
+- 自动内容归档只遍历 `freepublish/batchget` 已发布文章，并逐篇调用 `freepublish/getarticle` 保存详情接口全部字段；草稿最新页只用于读取 `article_type`，素材库不参与历史同步。
 - 所有响应先按原始字节写入 SQLite，再生成可查询的文章指标行；微信新增字段无需改结构即可留存。
-- 每天 `08:30` 先抓昨天及最近 30 天仍会变化的数据，再用剩余配额从官方最早可用日期断点回填。
+- 每天 `08:30` 先抓昨天及最近 30 天仍会变化的数据，再在保留每日 2% 官方额度后，从新到旧断点回填；额度按上海时区自然日自动刷新。
 - 可每 `15` 分钟先轮询官方 `draft/batchget` 保留文章类型，再轮询 `freepublish/batchget`：只有官方确认为普通图文 `article_type=news` 的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
-- 将文章元数据、正文内容、封面信息和同步状态写入飞书多维表格。
+- 已发布文章、文章指标、粉丝指标、评论和同步状态先完整落 SQLite；Base 同步显式开启后再批量增量写入。
 - 启动后自动执行一次同步，并由内置 scheduler 每天 `09:00` 再次同步。
 - 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
 - 媒体 worker 可后台补齐封面图链接和正文图片链接。
-- 历史素材 worker 可通过 `material/batchget_material` 回填素材库旧文章。
 - 图片可优先转存到阿里云 OSS；未配置 OSS 时回退到本地 `/media/` 静态目录。
 - 提供健康检查、手动触发同步和查看 cursor 的 HTTP API。
 
@@ -122,8 +121,8 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 官方采集器：
 
 - `OFFICIAL_API_DB_PATH`，默认 `./data/wechat-official.db`
-- `ANALYTICS_MAX_CALLS_PER_RUN`，默认 `500`
-- `CONTENT_MAX_CALLS_PER_RUN`，默认 `200`
+- `ANALYTICS_MAX_CALLS_PER_RUN`，默认 `2000`；实际运行会动态扣除当天余下的发布轮询预算
+- `CONTENT_MAX_CALLS_PER_RUN`，默认 `400`；优先补齐已发布列表与逐篇详情
 - `ANALYTICS_BACKFILL_START`，可限制历史补采起点；不填时按各接口官方起始日期
 - `OFFICIAL_COLLECTOR_INITIAL_DELAY_SECONDS`，默认 `5`
 - `ENABLE_OFFICIAL_API_COLLECTOR`，默认开启
@@ -151,7 +150,8 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `GO_MEMORY_LIMIT_MB`，默认 `512`
 - `FEISHU_RECORD_BATCH_SIZE`
 - `WECHAT_DAILY_QUOTA_LIMIT`
-- `WECHAT_DAILY_QUOTA_RESERVE`
+- `WECHAT_DAILY_QUOTA_RESERVE_PERCENT`，默认 `2`
+- `WECHAT_DAILY_QUOTA_RESERVE`，旧版绝对值兼容项；百分比配置优先
 - `WECHAT_PUBLISHED_PAGE_SIZE`
 - `WECHAT_PUBLISHED_RECENT_PAGES`
 - `WECHAT_PUBLISHED_BACKFILL_GROW_PAGES`
@@ -167,7 +167,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `MEDIA_WORKER_INITIAL_DELAY_SECONDS`
 - `MEDIA_WORKER_INTERVAL_MINUTES`
 
-历史素材 worker：
+历史素材 worker（旧版可选能力，默认不启用）：
 
 - `ENABLE_HISTORY_WORKER`
 - `HISTORY_WORKER_INITIAL_DELAY_SECONDS`
@@ -221,9 +221,9 @@ X-API-Key: <token>
 ### 官方数据写回多维表格
 
 - `ENABLE_OFFICIAL_BASE_SYNC=1` 时，每隔 `OFFICIAL_BASE_SYNC_INTERVAL_MINUTES` 分钟把 SQLite 中已归档的官方数据增量写回 `FEISHU_BITABLE_APP_TOKEN`。
-- 自动维护 13 张可关联的仪表盘数据表：`文章主档`、`文章每日指标`、`文章累计指标`、`账号内容日报`、`粉丝来源日报`、`粉丝累计日报`、`消息互动指标`、`接口性能指标`、`内容资产主档`、`内容条目主档`、`文章评论`、`API调用日志`、`接口同步状态`。
+- 自动维护 8 张可关联的仪表盘数据表：`文章主档`、`文章每日指标`、`文章累计指标`、`账号内容日报`、`粉丝来源日报`、`粉丝累计日报`、`文章评论`、`接口同步状态`。草稿、图片/图文/视频/语音素材、消息指标、接口性能和 API 调用日志不写入 Base。
 - 每条记录使用官方 `msgid`、日期和来源维度组成稳定唯一键；本地保存 Base `record_id` 与 payload hash，只同步新增或变化的记录，不在每轮扫描后全表重写。
-- 所有已知官方字段结构化写入，嵌套数组与未知新增字段同时保留在原始 JSON 字段；每一次官方 API 调用的请求、响应、状态码、错误码、响应哈希和原始 JSON 也单独入表。Base 单个文本单元格超过平台上限时会写入带 SHA-256 的可追踪截断值，二进制响应在 Base 记录类型与字节数，SQLite 始终保留完整原始字节。
+- 所有已知官方字段结构化写入，嵌套数组与未知新增字段同时保留在原始 JSON 字段。Base 单个文本单元格超过平台上限时会写入带 SHA-256 的可追踪截断值，SQLite 始终保留完整原始字节。
 - 新发布正文按轮询间隔同步；微信文章与粉丝统计接口的结束日期最大为昨日，因此指标在官方提供后立即同步，不能伪造成同日实时数据。
 
 ### 自动排版
@@ -251,9 +251,9 @@ X-API-Key: <token>
 - 优先写入 OSS；未配置 OSS 时写入本地 `PUBLIC_MEDIA_DIR` 或 `./media`。
 - 不阻塞主同步。
 
-### 历史素材 worker
+### 历史素材 worker（旧版可选能力）
 
-- 默认启用。
+- 默认不启用，也不属于当前“已发布文章”同步范围。
 - 分页遍历素材库中的图文消息。
 - 使用 `cursor.materialNewsOffset` 断点续传。
 - 内置配额感知，达到限制后自动暂停。
@@ -269,4 +269,4 @@ X-API-Key: <token>
 - `.sync-cursor.json` 是本地同步进度文件，不是业务数据。
 - 主同步链路优先保证稳定，媒体补齐和历史回填不应影响主同步。
 - 6 个旧文章分析接口已由微信返回 `47009 this api is offline, please use the new api`；服务不会无限重试，而是记录下线响应并使用新接口。
-- 微信官方 API 没有“全部群发文章正文列表”接口；本服务只保存官方接口实际返回的数据，不用网页或订阅源补造。
+- 已发布文章全量列表使用官方 `freepublish/batchget` 倒序分页获取；本服务不用网页或订阅源补造数据。

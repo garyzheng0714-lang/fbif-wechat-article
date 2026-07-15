@@ -55,13 +55,13 @@ func NewRuntimeFromEnv() (*Runtime, error) {
 		Analytics: &Collector{
 			Client:        wechat.NewDataCubeClient(),
 			Store:         store,
-			MaxCalls:      envInt("ANALYTICS_MAX_CALLS_PER_RUN", 500),
+			MaxCalls:      envInt("ANALYTICS_MAX_CALLS_PER_RUN", 2000),
 			BackfillStart: strings.TrimSpace(os.Getenv("ANALYTICS_BACKFILL_START")),
 		},
 		Content: &ContentCollector{
 			Client:   wechat.NewContentClient(),
 			Store:    store,
-			MaxCalls: envInt("CONTENT_MAX_CALLS_PER_RUN", 200),
+			MaxCalls: envInt("CONTENT_MAX_CALLS_PER_RUN", 400),
 		},
 	}
 	layoutDispatcher, err := autolayout.NewFromEnv(store)
@@ -87,14 +87,26 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 	defer r.runMu.Unlock()
 
 	result := &CombinedRunResult{}
-	analyticsResult, analyticsErr := r.Analytics.Run(ctx)
-	result.Analytics = analyticsResult
-	LogRunResult("OfficialAnalytics", analyticsResult, analyticsErr)
+	pollInterval := time.Duration(envInt("AUTO_LAYOUT_POLL_INTERVAL_MINUTES", 15)) * time.Minute
 
-	contentResult, contentErr := r.Content.Run(ctx)
-	result.Content = contentResult
-	if contentResult != nil {
-		log.Printf("[OfficialContent] calls=%d succeeded=%d failed=%d", contentResult.Calls, contentResult.Succeeded, contentResult.Failed)
+	// 先把最新已发布文章、图集类型和文章详情落库。历史详情也按剩余额度执行，
+	// 但必须给今天余下的 15 分钟发布轮询留出固定预算。
+	contentConfiguredMax := r.Content.MaxCalls
+	quotaBeforeContent := wechat.CurrentDailyQuotaStatus()
+	contentBudget, contentPollReserve := quotaAwareCallBudget(
+		contentConfiguredMax, quotaBeforeContent.UsableRemaining, time.Now(), pollInterval, r.Layout != nil, 2,
+	)
+	var contentErr error
+	if contentBudget > 0 {
+		r.Content.MaxCalls = contentBudget
+		result.Content, contentErr = r.Content.Run(ctx)
+		r.Content.MaxCalls = contentConfiguredMax
+	} else {
+		nowMs := time.Now().UnixMilli()
+		result.Content = &ContentRunResult{StartedAt: nowMs, FinishedAt: nowMs}
+	}
+	if result.Content != nil {
+		log.Printf("[OfficialContent] budget=%d poll_reserve=%d calls=%d succeeded=%d failed=%d", contentBudget, contentPollReserve, result.Content.Calls, result.Content.Succeeded, result.Content.Failed)
 	}
 	if contentErr != nil {
 		log.Printf("[OfficialContent] Completed with errors: %v", contentErr)
@@ -109,7 +121,47 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 			log.Printf("[AutoLayout] Completed with errors: %v", layoutErr)
 		}
 	}
-	return result, errors.Join(analyticsErr, contentErr, layoutErr)
+
+	// 内容归档完成后，文章/粉丝及其他官方数据接口才使用剩余额度回填。
+	// 预算实时扣除已用量和今天余下的发布轮询；硬保留的 2% 已由 quota 层排除。
+	analyticsConfiguredMax := r.Analytics.MaxCalls
+	quotaBeforeAnalytics := wechat.CurrentDailyQuotaStatus()
+	analyticsBudget, analyticsPollReserve := quotaAwareCallBudget(
+		analyticsConfiguredMax, quotaBeforeAnalytics.UsableRemaining, time.Now(), pollInterval, r.Layout != nil, 0,
+	)
+	var analyticsErr error
+	if analyticsBudget > 0 {
+		r.Analytics.MaxCalls = analyticsBudget
+		result.Analytics, analyticsErr = r.Analytics.Run(ctx)
+		r.Analytics.MaxCalls = analyticsConfiguredMax
+	} else {
+		nowMs := time.Now().UnixMilli()
+		result.Analytics = &RunResult{StartedAt: nowMs, FinishedAt: nowMs, QuotaExhausted: quotaBeforeAnalytics.UsableRemaining == 0}
+	}
+	log.Printf("[OfficialAnalytics] budget=%d poll_reserve=%d quota_used=%d usable_remaining=%d", analyticsBudget, analyticsPollReserve, quotaBeforeAnalytics.Used, quotaBeforeAnalytics.UsableRemaining)
+	LogRunResult("OfficialAnalytics", result.Analytics, analyticsErr)
+
+	return result, errors.Join(contentErr, layoutErr, analyticsErr)
+}
+
+// quotaAwareCallBudget 把 98% 可用额度再分为“今天余下的发布轮询”和“本次回填”。
+// minimum 只用于内容采集，保证还有额度时至少能完成 draft + freepublish 最新页。
+func quotaAwareCallBudget(configuredMax, usableRemaining int, now time.Time, pollInterval time.Duration, layoutEnabled bool, minimum int) (budget int, pollReserve int) {
+	if configuredMax <= 0 || usableRemaining <= 0 {
+		return 0, 0
+	}
+	if layoutEnabled && pollInterval > 0 {
+		localNow := now.In(wechat.ShanghaiLoc())
+		nextMidnight := time.Date(localNow.Year(), localNow.Month(), localNow.Day()+1, 0, 0, 0, 0, wechat.ShanghaiLoc())
+		remaining := nextMidnight.Sub(localNow)
+		polls := int((remaining + pollInterval - 1) / pollInterval)
+		pollReserve = polls * 2 // 每轮只调用 draft/batchget + freepublish/batchget。
+	}
+	availableForRun := usableRemaining - pollReserve
+	if availableForRun < minimum {
+		availableForRun = min(minimum, usableRemaining)
+	}
+	return min(configuredMax, max(availableForRun, 0)), pollReserve
 }
 
 func (r *Runtime) Status(ctx context.Context) (*RuntimeStatus, error) {

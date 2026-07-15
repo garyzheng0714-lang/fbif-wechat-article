@@ -192,6 +192,10 @@ func TestDispatcherSkipsNewspicAndHoldsUnclassified(t *testing.T) {
 	}
 
 	saveDraftArticle(t, store, "draft-newspic", "小绿书", "newspic", now.Add(time.Minute))
+	// newspic 发布时微信会改写正文形态；类型关联不能依赖正文逐字一致。
+	if err := store.SaveContentDetail(context.Background(), "draft", "draft-newspic", []byte(`{"news_item":[{"title":"小绿书","author":"作者","content":"发布前图集正文","thumb_url":"https://mmbiz.qpic.cn/cover.jpg"}]}`), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	savePublishedArticle(t, store, "published-newspic", "小绿书", "https://mp.weixin.qq.com/s/newspic", now.Add(time.Minute))
 	skipped, err := dispatcher.Sync(context.Background())
 	if err != nil {
@@ -225,6 +229,37 @@ func TestDispatcherSkipsNewspicAndHoldsUnclassified(t *testing.T) {
 	}
 	if released.HeldUnclassified != 0 || released.Discovered != 1 || released.Delivered != 1 || len(fake.articles) != 1 {
 		t.Fatalf("官方确认 news 后应恢复投递：result=%+v calls=%d", released, len(fake.articles))
+	}
+}
+
+func TestDispatcherSkipsNewspicWhenOnlyStableIdentityIsTitleAndIndex(t *testing.T) {
+	store, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 15, 8, 32, 0, 0, time.UTC)
+	fake := &fakeLayoutAPI{}
+	dispatcher := &Dispatcher{Store: store, Client: fake, MaxDeliveries: 20, Now: func() time.Time { return now }}
+	if _, err := dispatcher.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	draft := []byte(fmt.Sprintf(`{"total_count":1,"item_count":1,"item":[{"media_id":"draft-gallery","update_time":%d,"content":{"news_item":[{"article_type":"newspic","title":"脑洞大开！甜味的骨汤气泡饮料来了","content":"发布前图集正文"}]}}]}`, now.Add(time.Minute).Unix()))
+	if _, err := store.SaveContentPage(context.Background(), "draft", draft, now); err != nil {
+		t.Fatal(err)
+	}
+	published := []byte(fmt.Sprintf(`{"total_count":1,"item_count":1,"item":[{"article_id":"published-gallery","update_time":%d,"content":{"news_item":[{"title":"脑洞大开！甜味的骨汤气泡饮料来了","content":"发布后微信改写的正文","url":"https://mp.weixin.qq.com/s/gallery"}]}}]}`, now.Add(3*time.Hour).Unix()))
+	if _, err := store.SaveContentPage(context.Background(), "freepublish", published, now.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := dispatcher.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SkippedNewspic != 1 || result.Discovered != 0 || len(fake.articles) != 0 {
+		t.Fatalf("真实图集形态不得进入排版：result=%+v calls=%d", result, len(fake.articles))
 	}
 }
 

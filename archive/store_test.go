@@ -297,6 +297,48 @@ func TestCommentResponsePreservesEveryFieldAndCreatesBaseFact(t *testing.T) {
 	}
 }
 
+func TestBaseSyncStatusOnlyIncludesPublishedArticleAndFollowerScope(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 15, 8, 30, 0, 0, time.UTC)
+	if err := store.MarkSuccess(context.Background(), "getarticleread", "article", "2026-07-14", "2026-07-14", "2026-07-13", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSuccess(context.Background(), "getupstreammsgdistweek", "message", "2026-07-14", "2026-07-14", "2026-07-13", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkContentPageSuccess(context.Background(), "freepublish", 20, 273, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkContentPageSuccess(context.Background(), "draft", 20, 7518, false, now); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := store.ListBaseSyncCandidates(context.Background(), BaseDatasetSyncStatus, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("sync status rows=%d want article API + freepublish only: %+v", len(rows), rows)
+	}
+	got := map[string]BaseSyncCandidate{}
+	for _, row := range rows {
+		got[row.RowKey] = row
+	}
+	if got["api:getarticleread"].Fields["回填方向"] != "newest_to_oldest" {
+		t.Fatalf("article backfill direction missing: %+v", got["api:getarticleread"])
+	}
+	if _, exists := got["api:getupstreammsgdistweek"]; exists {
+		t.Fatal("message analytics must not enter Base sync status")
+	}
+	if _, exists := got["content:draft"]; exists {
+		t.Fatal("draft inventory must not enter Base sync status")
+	}
+}
+
 func TestOpenBackfillsCommentsFromArchivedRawResponses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "comments.db")
 	store, err := Open(path)

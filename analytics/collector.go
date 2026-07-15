@@ -198,6 +198,11 @@ func (c *Collector) Run(ctx context.Context) (*RunResult, error) {
 				continue
 			}
 			if complete {
+				if err := c.Store.MarkBackfillComplete(ctx, endpoint.Name, endpoint.Category, c.now()); err != nil {
+					failedEndpoint[endpoint.Name] = true
+					result.Errors[endpoint.Name] = err.Error()
+					runErrors = append(runErrors, err)
+				}
 				continue
 			}
 
@@ -301,26 +306,40 @@ func (c *Collector) nextBackfillWindow(ctx context.Context, endpoint wechat.Data
 	if err != nil {
 		return wechat.DateWindow{}, "", false, err
 	}
-	startDate := endpoint.EarliestDate
-	if c.BackfillStart != "" && c.BackfillStart > startDate {
-		startDate = c.BackfillStart
+	earliestDate := endpoint.EarliestDate
+	if c.BackfillStart != "" && c.BackfillStart > earliestDate {
+		earliestDate = c.BackfillStart
 	}
-	if state != nil && state.NextBackfillDate != "" {
-		startDate = state.NextBackfillDate
-	}
-
-	start, err := time.ParseInLocation("2006-01-02", startDate, wechat.ShanghaiLoc())
+	earliest, err := time.ParseInLocation("2006-01-02", earliestDate, wechat.ShanghaiLoc())
 	if err != nil {
-		return wechat.DateWindow{}, "", false, fmt.Errorf("invalid backfill date for %s: %w", endpoint.Name, err)
+		return wechat.DateWindow{}, "", false, fmt.Errorf("invalid earliest backfill date for %s: %w", endpoint.Name, err)
 	}
-	if start.After(yesterday) {
+	if state != nil && state.BackfillDirection == "newest_to_oldest" && state.BackfillComplete {
 		return wechat.DateWindow{}, "", true, nil
 	}
-	end := start.AddDate(0, 0, endpoint.MaxSpanDays-1)
-	if end.After(yesterday) {
-		end = yesterday
+	refreshDays := endpoint.RefreshDays
+	if refreshDays < 1 {
+		refreshDays = 1
 	}
-	next := end.AddDate(0, 0, 1).Format("2006-01-02")
+	end := yesterday.AddDate(0, 0, -refreshDays)
+	if state != nil && state.BackfillDirection == "newest_to_oldest" && state.NextBackfillDate != "" {
+		end, err = time.ParseInLocation("2006-01-02", state.NextBackfillDate, wechat.ShanghaiLoc())
+		if err != nil {
+			return wechat.DateWindow{}, "", false, fmt.Errorf("invalid newest-to-oldest cursor for %s: %w", endpoint.Name, err)
+		}
+	}
+	if end.Before(earliest) {
+		return wechat.DateWindow{}, "", true, nil
+	}
+	maxDays := endpoint.MaxSpanDays
+	if maxDays < 1 {
+		maxDays = 1
+	}
+	start := end.AddDate(0, 0, -(maxDays - 1))
+	if start.Before(earliest) {
+		start = earliest
+	}
+	next := start.AddDate(0, 0, -1).Format("2006-01-02")
 	return wechat.DateWindow{
 		Begin: start.Format("2006-01-02"),
 		End:   end.Format("2006-01-02"),

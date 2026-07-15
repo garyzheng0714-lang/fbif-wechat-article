@@ -354,15 +354,17 @@ var baseSyncSourceQueries = map[string]string{
 				'数据集', endpoint,
 				'类型', '数据接口',
 				'分类', category,
+				'回填方向', backfill_direction,
 				'下次回填位置', next_backfill_date,
 				'总数', NULL,
-				'是否完成', CASE WHEN next_backfill_date = '' THEN 0 ELSE 1 END,
+				'是否完成', backfill_complete,
 				'最后成功时间', last_success_at,
 				'最后错误', last_error,
 				'连续失败次数', consecutive_failures,
 				'状态更新时间', updated_at
 			) AS payload_json
 		FROM official_api_state
+		WHERE category IN ('article', 'user')
 		UNION ALL
 		SELECT
 			'content:' || stream AS row_key,
@@ -372,6 +374,7 @@ var baseSyncSourceQueries = map[string]string{
 				'数据集', stream,
 				'类型', '内容接口',
 				'分类', 'content',
+				'回填方向', 'newest_to_oldest',
 				'下次回填位置', CAST(next_offset AS TEXT),
 				'总数', total_count,
 				'是否完成', complete,
@@ -381,6 +384,7 @@ var baseSyncSourceQueries = map[string]string{
 				'状态更新时间', updated_at
 			) AS payload_json
 		FROM official_content_state
+		WHERE stream = 'freepublish'
 		UNION ALL
 		SELECT
 			'base:' || dataset AS row_key,
@@ -393,6 +397,7 @@ var baseSyncSourceQueries = map[string]string{
 				'数据集', dataset,
 				'类型', 'Base写回',
 				'分类', 'base',
+				'回填方向', '',
 				'下次回填位置', '',
 				'总数', COUNT(*),
 				'是否完成', CASE WHEN SUM(last_error <> '') = 0 THEN 1 ELSE 0 END,

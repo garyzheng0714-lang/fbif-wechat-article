@@ -97,6 +97,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			endpoint TEXT PRIMARY KEY,
 			category TEXT NOT NULL,
 			next_backfill_date TEXT NOT NULL DEFAULT '',
+			backfill_direction TEXT NOT NULL DEFAULT '',
+			backfill_complete INTEGER NOT NULL DEFAULT 0,
 			last_success_begin TEXT NOT NULL DEFAULT '',
 			last_success_end TEXT NOT NULL DEFAULT '',
 			last_success_at INTEGER NOT NULL DEFAULT 0,
@@ -305,12 +307,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE VIEW IF NOT EXISTS official_article_catalog AS
 			WITH ranked_content AS (
 				SELECT
-					*,
+					a.*,
+					o.update_time AS object_update_time,
 					ROW_NUMBER() OVER (
-						PARTITION BY url ORDER BY last_seen_at DESC, object_id
+						PARTITION BY a.url ORDER BY a.last_seen_at DESC, a.object_id
 					) AS recency_rank
-				FROM official_content_articles
-				WHERE source = 'freepublish' AND url <> ''
+				FROM official_content_articles AS a
+				JOIN official_content_objects AS o
+					ON o.source = a.source AND o.object_id = a.object_id
+				WHERE a.source = 'freepublish' AND a.url <> ''
 			)
 			SELECT
 				p.msgid,
@@ -335,15 +340,17 @@ func (s *Store) migrate(ctx context.Context) error {
 						ELSE ''
 					END
 					FROM official_content_articles AS d
+					JOIN official_content_objects AS draft_object
+						ON draft_object.source = d.source AND draft_object.object_id = d.object_id
 					WHERE d.source = 'draft'
 						AND d.article_type <> ''
 						AND d.article_index = c.article_index
 						AND d.title = c.title
-						AND d.author = c.author
-						AND d.content_html = c.content_html
-						AND d.content_source_url = c.content_source_url
-						AND d.thumb_media_id = c.thumb_media_id
-						AND d.thumb_url = c.thumb_url
+						AND draft_object.update_time BETWEEN c.object_update_time - 2592000 AND c.object_update_time + 300
+						AND (d.author = '' OR c.author = '' OR d.author = c.author)
+						AND (d.content_source_url = '' OR c.content_source_url = '' OR d.content_source_url = c.content_source_url)
+						AND (d.thumb_media_id = '' OR c.thumb_media_id = '' OR d.thumb_media_id = c.thumb_media_id)
+						AND (d.thumb_url = '' OR c.thumb_url = '' OR d.thumb_url = c.thumb_url)
 				), '') AS article_type,
 				c.is_deleted,
 				p.publication_raw_json,
@@ -421,15 +428,17 @@ func (s *Store) migrate(ctx context.Context) error {
 						ELSE ''
 					END
 					FROM official_content_articles AS d
+					JOIN official_content_objects AS draft_object
+						ON draft_object.source = d.source AND draft_object.object_id = d.object_id
 					WHERE d.source = 'draft'
 						AND d.article_type <> ''
 						AND d.article_index = a.article_index
 						AND d.title = a.title
-						AND d.author = a.author
-						AND d.content_html = a.content_html
-						AND d.content_source_url = a.content_source_url
-						AND d.thumb_media_id = a.thumb_media_id
-						AND d.thumb_url = a.thumb_url
+						AND draft_object.update_time BETWEEN o.update_time - 2592000 AND o.update_time + 300
+						AND (d.author = '' OR a.author = '' OR d.author = a.author)
+						AND (d.content_source_url = '' OR a.content_source_url = '' OR d.content_source_url = a.content_source_url)
+						AND (d.thumb_media_id = '' OR a.thumb_media_id = '' OR d.thumb_media_id = a.thumb_media_id)
+						AND (d.thumb_url = '' OR a.thumb_url = '' OR d.thumb_url = a.thumb_url)
 				), '') AS article_type,
 				a.is_deleted,
 				p.publication_raw_json,
@@ -542,6 +551,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "official_layout_outbox", "published_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_api_state", "backfill_direction", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_api_state", "backfill_complete", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "official_content_articles", "article_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -1372,6 +1387,8 @@ type EndpointState struct {
 	Endpoint            string `json:"endpoint"`
 	Category            string `json:"category"`
 	NextBackfillDate    string `json:"nextBackfillDate"`
+	BackfillDirection   string `json:"backfillDirection"`
+	BackfillComplete    bool   `json:"backfillComplete"`
 	LastSuccessBegin    string `json:"lastSuccessBegin"`
 	LastSuccessEnd      string `json:"lastSuccessEnd"`
 	LastSuccessAt       int64  `json:"lastSuccessAt"`
@@ -1383,15 +1400,19 @@ type EndpointState struct {
 
 func (s *Store) GetState(ctx context.Context, endpoint string) (*EndpointState, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT endpoint, category, next_backfill_date, last_success_begin,
+		SELECT endpoint, category, next_backfill_date, backfill_direction,
+			backfill_complete, last_success_begin,
 			last_success_end, last_success_at, last_attempt_at, last_error,
 			consecutive_failures, updated_at
 		FROM official_api_state WHERE endpoint = ?`, endpoint)
 	var state EndpointState
+	var complete int
 	if err := row.Scan(
 		&state.Endpoint,
 		&state.Category,
 		&state.NextBackfillDate,
+		&state.BackfillDirection,
+		&complete,
 		&state.LastSuccessBegin,
 		&state.LastSuccessEnd,
 		&state.LastSuccessAt,
@@ -1405,6 +1426,7 @@ func (s *Store) GetState(ctx context.Context, endpoint string) (*EndpointState, 
 		}
 		return nil, err
 	}
+	state.BackfillComplete = complete != 0
 	return &state, nil
 }
 
@@ -1413,17 +1435,30 @@ func (s *Store) MarkSuccess(ctx context.Context, endpoint, category, beginDate, 
 		now = time.Now()
 	}
 	nowMs := now.UnixMilli()
+	backfillDirection := ""
+	if nextBackfillDate != "" {
+		backfillDirection = "newest_to_oldest"
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO official_api_state (
-			endpoint, category, next_backfill_date, last_success_begin,
+			endpoint, category, next_backfill_date, backfill_direction,
+			backfill_complete, last_success_begin,
 			last_success_end, last_success_at, last_attempt_at, last_error,
 			consecutive_failures, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, ?)
+		) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, '', 0, ?)
 		ON CONFLICT(endpoint) DO UPDATE SET
 			category = excluded.category,
 			next_backfill_date = CASE
 				WHEN excluded.next_backfill_date = '' THEN official_api_state.next_backfill_date
 				ELSE excluded.next_backfill_date
+			END,
+			backfill_direction = CASE
+				WHEN excluded.backfill_direction = '' THEN official_api_state.backfill_direction
+				ELSE excluded.backfill_direction
+			END,
+			backfill_complete = CASE
+				WHEN excluded.backfill_direction = '' THEN official_api_state.backfill_complete
+				ELSE 0
 			END,
 			last_success_begin = excluded.last_success_begin,
 			last_success_end = excluded.last_success_end,
@@ -1435,12 +1470,31 @@ func (s *Store) MarkSuccess(ctx context.Context, endpoint, category, beginDate, 
 		endpoint,
 		category,
 		nextBackfillDate,
+		backfillDirection,
 		beginDate,
 		endDate,
 		nowMs,
 		nowMs,
 		nowMs,
 	)
+	return err
+}
+
+func (s *Store) MarkBackfillComplete(ctx context.Context, endpoint, category string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	nowMs := now.UnixMilli()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO official_api_state (
+			endpoint, category, backfill_direction, backfill_complete, updated_at
+		) VALUES (?, ?, 'newest_to_oldest', 1, ?)
+		ON CONFLICT(endpoint) DO UPDATE SET
+			category = excluded.category,
+			backfill_direction = 'newest_to_oldest',
+			backfill_complete = 1,
+			updated_at = excluded.updated_at`,
+		endpoint, category, nowMs)
 	return err
 }
 
@@ -1471,7 +1525,8 @@ func (s *Store) MarkFailure(ctx context.Context, endpoint, category, errorMessag
 
 func (s *Store) ListStates(ctx context.Context) ([]EndpointState, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT endpoint, category, next_backfill_date, last_success_begin,
+		SELECT endpoint, category, next_backfill_date, backfill_direction,
+			backfill_complete, last_success_begin,
 			last_success_end, last_success_at, last_attempt_at, last_error,
 			consecutive_failures, updated_at
 		FROM official_api_state ORDER BY endpoint`)
@@ -1483,10 +1538,13 @@ func (s *Store) ListStates(ctx context.Context) ([]EndpointState, error) {
 	states := make([]EndpointState, 0)
 	for rows.Next() {
 		var state EndpointState
+		var complete int
 		if err := rows.Scan(
 			&state.Endpoint,
 			&state.Category,
 			&state.NextBackfillDate,
+			&state.BackfillDirection,
+			&complete,
 			&state.LastSuccessBegin,
 			&state.LastSuccessEnd,
 			&state.LastSuccessAt,
@@ -1497,6 +1555,7 @@ func (s *Store) ListStates(ctx context.Context) ([]EndpointState, error) {
 		); err != nil {
 			return nil, err
 		}
+		state.BackfillComplete = complete != 0
 		states = append(states, state)
 	}
 	return states, rows.Err()

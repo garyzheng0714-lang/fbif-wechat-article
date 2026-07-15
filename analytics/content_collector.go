@@ -51,21 +51,7 @@ var contentStreams = []contentStream{
 	{Name: "freepublish", Source: "freepublish", ListEndpoint: "freepublish_batchget", DetailEndpoint: "freepublish_getarticle", Payload: func(offset int) map[string]interface{} {
 		return map[string]interface{}{"offset": offset, "count": 20, "no_return_content": false}
 	}},
-	{Name: "material_news", Source: "material_news", ListEndpoint: "material_batchget_material", DetailEndpoint: "material_get_material", Payload: func(offset int) map[string]interface{} {
-		return map[string]interface{}{"type": "news", "offset": offset, "count": 20}
-	}},
-	{Name: "material_image", Source: "material_image", ListEndpoint: "material_batchget_material", Payload: func(offset int) map[string]interface{} {
-		return map[string]interface{}{"type": "image", "offset": offset, "count": 20}
-	}},
-	{Name: "material_voice", Source: "material_voice", ListEndpoint: "material_batchget_material", Payload: func(offset int) map[string]interface{} {
-		return map[string]interface{}{"type": "voice", "offset": offset, "count": 20}
-	}},
-	{Name: "material_video", Source: "material_video", ListEndpoint: "material_batchget_material", Payload: func(offset int) map[string]interface{} {
-		return map[string]interface{}{"type": "video", "offset": offset, "count": 20}
-	}},
 }
-
-const publishedHistoryPagesPerRun = 20
 
 func contentStreamByName(name string) (contentStream, bool) {
 	for _, stream := range contentStreams {
@@ -93,27 +79,18 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 	var runErrors []error
 	failed := make(map[string]bool)
 
-	// Counts are separate official interfaces and are always captured first.
-	for _, endpointName := range []string{"draft_count", "material_get_materialcount"} {
-		if result.Calls >= maxCalls {
-			break
-		}
-		if err := c.callAndArchive(ctx, endpointName, nil, "", ""); err != nil {
-			result.Failed++
-			result.Errors[endpointName] = err.Error()
-			runErrors = append(runErrors, err)
-			if isQuotaError(err) {
-				break
-			}
-		} else {
-			result.Succeeded++
-		}
-		result.Calls++
+	draftStream, hasDraftStream := contentStreamByName("draft")
+	publishedStream, hasPublishedStream := contentStreamByName("freepublish")
+	if !hasDraftStream || !hasPublishedStream {
+		return result, fmt.Errorf("draft/freepublish content streams are not configured")
 	}
+	recentStreams := []contentStream{draftStream, publishedStream}
 
-	// First page of every inventory is refreshed every run, newest content first.
-	recentObjects := make(map[string][]string)
-	for _, stream := range contentStreams {
+	// Only the latest draft page is retained for the official news/newspic type.
+	// The durable inventory itself is freepublish: media-library inventories and
+	// historical drafts are outside the published-article archive scope.
+	var latestPublishedPage archive.ContentPageInfo
+	for _, stream := range recentStreams {
 		if result.Calls >= maxCalls {
 			break
 		}
@@ -130,14 +107,34 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 			continue
 		}
 		result.Succeeded++
-		recentObjects[stream.Name] = info.ObjectIDs
+		if stream.Name == publishedStream.Name {
+			latestPublishedPage = info
+		}
 	}
 
-	// freepublish 是已发布正文归档与自动排版的权威来源，必须在详情、评论等
-	// 可耗尽预算的接口之前获得固定分页机会。接口每页最多 20 个对象，20 页
-	// 足够覆盖当前数百篇历史；批量响应已含完整正文，无需为历史页逐篇调用详情接口。
-	publishedStream, hasPublishedStream := contentStreamByName("freepublish")
-	for pages := 0; hasPublishedStream && pages < publishedHistoryPagesPerRun && result.Calls < maxCalls && !failed["freepublish"]; pages++ {
+	// 首次运行已拿到最新一页，直接把游标放到下一页，避免重复消耗一次额度。
+	if !failed[publishedStream.Name] {
+		state, err := c.Store.GetContentState(ctx, publishedStream.Name)
+		if err != nil {
+			failed[publishedStream.Name] = true
+			result.Errors["freepublish_history"] = err.Error()
+			runErrors = append(runErrors, err)
+		} else if state == nil {
+			nextOffset := latestPublishedPage.ItemCount
+			if nextOffset == 0 {
+				nextOffset = len(latestPublishedPage.ObjectIDs)
+			}
+			complete := nextOffset == 0 || nextOffset >= latestPublishedPage.TotalCount
+			if err := c.Store.MarkContentPageSuccess(ctx, publishedStream.Name, nextOffset, latestPublishedPage.TotalCount, complete, c.now()); err != nil {
+				failed[publishedStream.Name] = true
+				result.Errors["freepublish_history"] = err.Error()
+				runErrors = append(runErrors, err)
+			}
+		}
+	}
+
+	// freepublish 按官方的倒序分页从新到旧完整落库；草稿和素材库不建立历史游标。
+	for result.Calls < maxCalls && !failed[publishedStream.Name] {
 		state, err := c.Store.GetContentState(ctx, "freepublish")
 		if err != nil {
 			failed["freepublish"] = true
@@ -167,90 +164,38 @@ func (c *ContentCollector) Run(ctx context.Context) (*ContentRunResult, error) {
 		result.Succeeded++
 	}
 
-	// Fetch full detail for recent article-bearing objects. Batch responses are
-	// already complete, but invoking detail endpoints protects against field
-	// differences and archives those official responses too.
-	for _, stream := range contentStreams {
-		if stream.DetailEndpoint == "" || failed[stream.Name] {
-			continue
+	// 批量接口已保存完整文章字段；仍对每个已发布对象调用详情接口，以保留
+	// 详情接口独有或未来新增的字段。待补对象按 update_time DESC，从新到旧。
+	for result.Calls < maxCalls && !failed[publishedStream.Name+"_detail"] {
+		objectIDs, err := c.Store.ListObjectsNeedingDetail(ctx, publishedStream.Source, min(20, maxCalls-result.Calls))
+		if err != nil {
+			failed[publishedStream.Name+"_detail"] = true
+			result.Errors[publishedStream.Name+"_detail"] = err.Error()
+			runErrors = append(runErrors, err)
+			break
 		}
-		for _, objectID := range recentObjects[stream.Name] {
+		if len(objectIDs) == 0 {
+			break
+		}
+		for _, objectID := range objectIDs {
 			if result.Calls >= maxCalls {
 				break
 			}
-			err := c.fetchDetail(ctx, stream, objectID)
+			err := c.fetchDetail(ctx, publishedStream, objectID)
 			result.Calls++
 			if err != nil {
 				result.Failed++
-				failed[stream.Name+"_detail"] = true
-				result.Errors[stream.Name+"_detail"] = err.Error()
+				failed[publishedStream.Name+"_detail"] = true
+				result.Errors[publishedStream.Name+"_detail"] = err.Error()
 				runErrors = append(runErrors, err)
-				if isQuotaError(err) {
-					break
-				}
-				// Permission errors affect the whole endpoint; do not repeat them
-				// for every object in the same run.
 				break
 			}
 			result.Succeeded++
 		}
 	}
+
 	messageErrors := c.enrichRecentMessages(ctx, result, maxCalls)
 	runErrors = append(runErrors, messageErrors...)
-
-	// Continue all six inventories round-robin from durable offsets.
-	for result.Calls < maxCalls {
-		progressed := false
-		for _, stream := range contentStreams {
-			if result.Calls >= maxCalls || failed[stream.Name] {
-				continue
-			}
-			state, err := c.Store.GetContentState(ctx, stream.Name)
-			if err != nil {
-				runErrors = append(runErrors, err)
-				failed[stream.Name] = true
-				continue
-			}
-			if state != nil && state.Complete {
-				continue
-			}
-			offset := 0
-			if state != nil {
-				offset = state.NextOffset
-			}
-			progressed = true
-			info, err := c.fetchPage(ctx, stream, offset, true)
-			result.Calls++
-			if err != nil {
-				result.Failed++
-				failed[stream.Name] = true
-				result.Errors[stream.Name] = err.Error()
-				runErrors = append(runErrors, err)
-				if isQuotaError(err) {
-					break
-				}
-				continue
-			}
-			result.Succeeded++
-
-			// One queued detail per historical page keeps both list and detail
-			// backfills moving without allowing 13k material details to starve lists.
-			if stream.DetailEndpoint != "" && len(info.ObjectIDs) > 0 && result.Calls < maxCalls && !failed[stream.Name+"_detail"] {
-				if err := c.fetchDetail(ctx, stream, info.ObjectIDs[0]); err != nil {
-					result.Failed++
-					failed[stream.Name+"_detail"] = true
-					result.Errors[stream.Name+"_detail"] = err.Error()
-					runErrors = append(runErrors, err)
-				} else {
-					result.Succeeded++
-				}
-				result.Calls++
-			}
-		}
-		if !progressed {
-			break
-		}
-	}
 
 	result.FinishedAt = c.now().UnixMilli()
 	if len(result.Errors) == 0 {

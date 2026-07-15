@@ -56,15 +56,17 @@ func (s *Store) ListOfficialPublishedArticles(ctx context.Context) ([]LayoutCand
 					ELSE ''
 				END
 				FROM official_content_articles AS d
+				JOIN official_content_objects AS draft_object
+					ON draft_object.source = d.source AND draft_object.object_id = d.object_id
 				WHERE d.source = 'draft'
 					AND d.article_type <> ''
 					AND d.article_index = a.article_index
 					AND d.title = a.title
-					AND d.author = a.author
-					AND d.content_html = a.content_html
-					AND d.content_source_url = a.content_source_url
-					AND d.thumb_media_id = a.thumb_media_id
-					AND d.thumb_url = a.thumb_url
+					AND draft_object.update_time BETWEEN o.update_time - 2592000 AND o.update_time + 300
+					AND (d.author = '' OR a.author = '' OR d.author = a.author)
+					AND (d.content_source_url = '' OR a.content_source_url = '' OR d.content_source_url = a.content_source_url)
+					AND (d.thumb_media_id = '' OR a.thumb_media_id = '' OR d.thumb_media_id = a.thumb_media_id)
+					AND (d.thumb_url = '' OR a.thumb_url = '' OR d.thumb_url = a.thumb_url)
 			), '') AS article_type,
 			a.author, a.content_html, a.url, a.thumb_url, o.update_time
 		FROM official_content_articles AS a
@@ -294,15 +296,17 @@ func (s *Store) LayoutStats(ctx context.Context) (LayoutOutboxStats, error) {
 							ELSE ''
 						END
 						FROM official_content_articles AS d
+						JOIN official_content_objects AS draft_object
+							ON draft_object.source = d.source AND draft_object.object_id = d.object_id
 						WHERE d.source = 'draft'
 							AND d.article_type <> ''
 							AND d.article_index = a.article_index
 							AND d.title = a.title
-							AND d.author = a.author
-							AND d.content_html = a.content_html
-							AND d.content_source_url = a.content_source_url
-							AND d.thumb_media_id = a.thumb_media_id
-							AND d.thumb_url = a.thumb_url
+							AND draft_object.update_time BETWEEN o.update_time - 2592000 AND o.update_time + 300
+							AND (d.author = '' OR a.author = '' OR d.author = a.author)
+							AND (d.content_source_url = '' OR a.content_source_url = '' OR d.content_source_url = a.content_source_url)
+							AND (d.thumb_media_id = '' OR a.thumb_media_id = '' OR d.thumb_media_id = a.thumb_media_id)
+							AND (d.thumb_url = '' OR a.thumb_url = '' OR d.thumb_url = a.thumb_url)
 					), '') AS article_type
 				FROM official_content_articles AS a
 				JOIN official_content_objects AS o

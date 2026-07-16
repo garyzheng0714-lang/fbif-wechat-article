@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -84,7 +85,7 @@ func main() {
 	mux.HandleFunc("/api/feishu/official-sync", requireAPIKey(officialBaseSyncHandler))
 	mux.HandleFunc("/api/feishu/cursor", requireAPIKey(cursorHandler))
 	mux.HandleFunc("/api/wechat/official/status", requireAPIKey(officialStatusHandler))
-	mux.HandleFunc("/api/wechat/official/monitoring", requireAPIKey(officialMonitoringHandler))
+	mux.HandleFunc("/api/wechat/official/monitoring", requireMonitoringAuth(officialMonitoringHandler))
 	mux.HandleFunc("/api/wechat/official/coverage", requireAPIKey(officialCoverageHandler))
 	mux.HandleFunc("/api/wechat/official/endpoints", requireAPIKey(officialEndpointsHandler))
 	mux.HandleFunc("/api/wechat/official/collect", requireAPIKey(officialCollectHandler))
@@ -182,8 +183,12 @@ func featureEnabled(key string, defaultValue bool) bool {
 
 func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if config.Env.APIKey == "" {
-			next.ServeHTTP(w, r)
+		apiKey := strings.TrimSpace(config.Env.APIKey)
+		if apiKey == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+				"success": false,
+				"error":   "API key authentication is not configured",
+			})
 			return
 		}
 		token := ""
@@ -193,10 +198,47 @@ func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 		if token == "" {
 			token = r.Header.Get("X-API-Key")
 		}
-		if token != config.Env.APIKey {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 				"success": false,
 				"error":   "invalid or missing API key",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	}
+}
+
+// requireMonitoringAuth keeps the compact monitoring surface available to the
+// least-privilege cross-service credential. The broad API key remains accepted
+// for operators, but the service token cannot reach status, coverage or write
+// endpoints because only this single route uses the middleware.
+func requireMonitoringAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		apiKey := strings.TrimSpace(config.Env.APIKey)
+		serviceToken := strings.TrimSpace(os.Getenv("PUBLISH_SYNC_SERVICE_TOKEN"))
+		if apiKey == "" && serviceToken == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+				"success": false,
+				"error":   "monitoring authentication is not configured",
+			})
+			return
+		}
+
+		providedAPIKey := ""
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			providedAPIKey = strings.TrimPrefix(auth, "Bearer ")
+		}
+		if providedAPIKey == "" {
+			providedAPIKey = r.Header.Get("X-API-Key")
+		}
+		providedServiceToken := r.Header.Get("X-Publish-Sync-Token")
+		apiKeyOK := apiKey != "" && subtle.ConstantTimeCompare([]byte(providedAPIKey), []byte(apiKey)) == 1
+		serviceTokenOK := serviceToken != "" && subtle.ConstantTimeCompare([]byte(providedServiceToken), []byte(serviceToken)) == 1
+		if !apiKeyOK && !serviceTokenOK {
+			writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
+				"success": false,
+				"error":   "invalid or missing monitoring credential",
 			})
 			return
 		}

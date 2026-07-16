@@ -35,27 +35,38 @@ jobs:
         continue-on-error: true
         env:
           APP_ENV_B64: ${{ secrets.APP_ENV_B64 }}
+          SYNC_SERVICE_TOKEN: ${{ secrets.PUBLISH_SYNC_SERVICE_TOKEN }}
           REPORTER_WEBHOOK_URL: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_URL }}
           REPORTER_WEBHOOK_SECRET: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
-          test -n "${APP_ENV_B64:-}"
           umask 077
-          printf '%s' "$APP_ENV_B64" | tr -d '\r\n ' | base64 -d > /tmp/official-watchdog.env
-          set -a
-          . /tmp/official-watchdog.env
-          set +a
+          if [ -n "${APP_ENV_B64:-}" ]; then
+            printf '%s' "$APP_ENV_B64" | tr -d '\r\n ' | base64 -d > /tmp/official-watchdog.env
+            set -a
+            . /tmp/official-watchdog.env
+            set +a
+          fi
+          if [ -n "${SYNC_SERVICE_TOKEN:-}" ]; then
+            PUBLISH_SYNC_SERVICE_TOKEN="${SYNC_SERVICE_TOKEN}"
+          fi
           if [ -n "${REPORTER_WEBHOOK_URL:-}" ]; then
             OFFICIAL_FEISHU_WEBHOOK_URL="${REPORTER_WEBHOOK_URL}"
             OFFICIAL_FEISHU_WEBHOOK_SECRET="${REPORTER_WEBHOOK_SECRET:-}"
           fi
-          for name in PUBLISH_SYNC_SERVICE_TOKEN API_KEY OFFICIAL_FEISHU_WEBHOOK_URL OFFICIAL_FEISHU_WEBHOOK_SECRET FEISHU_APP_ID FEISHU_APP_SECRET OFFICIAL_FEISHU_CHAT_ID; do
+          for name in PUBLISH_SYNC_SERVICE_TOKEN OFFICIAL_FEISHU_WEBHOOK_URL OFFICIAL_FEISHU_WEBHOOK_SECRET FEISHU_APP_ID FEISHU_APP_SECRET OFFICIAL_FEISHU_CHAT_ID; do
             value="${!name:-}"
             if [ -n "$value" ]; then
               echo "::add-mask::$value"
               printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
             fi
           done
+          test -n "${PUBLISH_SYNC_SERVICE_TOKEN:-}"
+          if [ -z "${OFFICIAL_FEISHU_WEBHOOK_URL:-}" ]; then
+            test -n "${FEISHU_APP_ID:-}"
+            test -n "${FEISHU_APP_SECRET:-}"
+            test -n "${OFFICIAL_FEISHU_CHAT_ID:-}"
+          fi
 
       - name: Open tunnel to official collector
         if: always()

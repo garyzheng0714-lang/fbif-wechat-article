@@ -190,11 +190,10 @@ def write_github_output(healthy: bool, issue_fingerprint: str) -> None:
 
 def run(args: argparse.Namespace) -> int:
     service_token = os.getenv("PUBLISH_SYNC_SERVICE_TOKEN", "").strip()
-    api_key = os.getenv("API_KEY", "").strip()
     checks = [
         ("layout", args.layout_url, {"X-Publish-Sync-Token": service_token}),
         ("feed", args.feed_url, {"X-Publish-Sync-Token": service_token}),
-        ("official", args.official_url, {"X-API-Key": api_key}),
+        ("official", args.official_url, {"X-Publish-Sync-Token": service_token}),
     ]
     issues: list[str] = []
     if not service_token:

@@ -120,6 +120,7 @@ jobs:
           ALIYUN_USER: ${{ secrets.ALIYUN_USER }}
           APP_DIR: ${{ secrets.APP_DIR }}
           APP_ENV_B64: ${{ secrets.APP_ENV_B64 }}
+          SYNC_SERVICE_TOKEN: ${{ secrets.PUBLISH_SYNC_SERVICE_TOKEN }}
           REPORTER_WEBHOOK_URL: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_URL }}
           REPORTER_WEBHOOK_SECRET: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_SECRET }}
         run: |
@@ -183,16 +184,16 @@ jobs:
               SOURCE_ENV="${NEW_ENV}"
             fi
 
-            # 日报机器人凭证可用独立 GitHub Secret 覆盖，避免为了新增一个群机器人
-            # 而搬运或重写整份 APP_ENV_B64。URL 一旦显式配置，SECRET 即使为空也
-            # 必须同步清空，兼容未开启签名校验的自定义机器人。
+            # 共享服务令牌和日报机器人凭证都可用独立 GitHub Secret 覆盖，避免
+            # 为新增监控能力搬运或重写整份 APP_ENV_B64。Webhook URL 一旦显式
+            # 配置，SECRET 即使为空也必须同步清空，兼容未开启签名校验的机器人。
             upsert_env_from_b64() {
               local key="$1"
               local encoded="$2"
               local value filtered
               value="$(printf '%s' "${encoded}" | tr -d '\r\n ' | base64 -d)"
               case "${value}" in
-                *$'\n'*|*$'\r'*) echo "Reporter secret ${key} contains a newline"; exit 1 ;;
+                *$'\n'*|*$'\r'*) echo "Deployment secret ${key} contains a newline"; exit 1 ;;
               esac
               filtered="${NEW_ENV}.filtered"
               grep -Ev "^[[:space:]]*(export[[:space:]]+)?${key}=" "${SOURCE_ENV}" > "${filtered}" || true
@@ -201,17 +202,31 @@ jobs:
               mv "${filtered}" "${NEW_ENV}"
               SOURCE_ENV="${NEW_ENV}"
             }
+            if [ -n "${PUBLISH_SYNC_SERVICE_TOKEN_B64:-}" ]; then
+              upsert_env_from_b64 PUBLISH_SYNC_SERVICE_TOKEN "${PUBLISH_SYNC_SERVICE_TOKEN_B64}"
+            fi
             if [ "${OFFICIAL_FEISHU_OVERRIDE:-0}" = "1" ]; then
               upsert_env_from_b64 OFFICIAL_FEISHU_WEBHOOK_URL "${OFFICIAL_FEISHU_WEBHOOK_URL_B64:-}"
               upsert_env_from_b64 OFFICIAL_FEISHU_WEBHOOK_SECRET "${OFFICIAL_FEISHU_WEBHOOK_SECRET_B64:-}"
             fi
 
             require_key() {
-              grep -Eq "^[[:space:]]*(export[[:space:]]+)?${1}=" "${SOURCE_ENV}"
+              local raw
+              raw="$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?${1}=(.*)$/\\2/p" "${SOURCE_ENV}" | tail -n 1)"
+              raw="${raw%$'\r'}"
+              raw="${raw#\"}"
+              raw="${raw%\"}"
+              [ -n "${raw//[[:space:]]/}" ]
             }
             require_key API_KEY || { echo "Deployment env missing API_KEY"; exit 1; }
-            grep -Eq '^[[:space:]]*(export[[:space:]]+)?(WECHAT_APPID|WECHAT_MP_APPID)=' "${SOURCE_ENV}" || { echo "Deployment env missing WeChat app id"; exit 1; }
-            grep -Eq '^[[:space:]]*(export[[:space:]]+)?(WECHAT_SECRET|WECHAT_APPSECRET|WECHAT_MP_SECRET)=' "${SOURCE_ENV}" || { echo "Deployment env missing WeChat secret"; exit 1; }
+            if ! require_key WECHAT_APPID && ! require_key WECHAT_MP_APPID; then
+              echo "Deployment env missing WeChat app id"
+              exit 1
+            fi
+            if ! require_key WECHAT_SECRET && ! require_key WECHAT_APPSECRET && ! require_key WECHAT_MP_SECRET; then
+              echo "Deployment env missing WeChat secret"
+              exit 1
+            fi
             if ! require_key OFFICIAL_FEISHU_WEBHOOK_URL; then
               require_key FEISHU_APP_ID || { echo "Deployment env missing FEISHU_APP_ID or OFFICIAL_FEISHU_WEBHOOK_URL"; exit 1; }
               require_key FEISHU_APP_SECRET || { echo "Deployment env missing FEISHU_APP_SECRET or OFFICIAL_FEISHU_WEBHOOK_URL"; exit 1; }
@@ -301,6 +316,7 @@ jobs:
           REMOTE_SCRIPT
 
           OFFICIAL_FEISHU_OVERRIDE=0
+          PUBLISH_SYNC_SERVICE_TOKEN_B64=""
           OFFICIAL_FEISHU_WEBHOOK_URL_B64=""
           OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=""
           if [ -n "${REPORTER_WEBHOOK_URL:-}" ]; then
@@ -308,10 +324,13 @@ jobs:
             OFFICIAL_FEISHU_WEBHOOK_URL_B64="$(printf '%s' "${REPORTER_WEBHOOK_URL}" | base64 -w 0)"
             OFFICIAL_FEISHU_WEBHOOK_SECRET_B64="$(printf '%s' "${REPORTER_WEBHOOK_SECRET:-}" | base64 -w 0)"
           fi
+          if [ -n "${SYNC_SERVICE_TOKEN:-}" ]; then
+            PUBLISH_SYNC_SERVICE_TOKEN_B64="$(printf '%s' "${SYNC_SERVICE_TOKEN}" | base64 -w 0)"
+          fi
 
           REMOTE_ENV="$(printf \
-            "APP_DIR=%q APP_ENV_B64=%q OFFICIAL_FEISHU_OVERRIDE=%q OFFICIAL_FEISHU_WEBHOOK_URL_B64=%q OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=%q" \
-            "${APP_DIR:-}" "${APP_ENV_B64:-}" "${OFFICIAL_FEISHU_OVERRIDE}" \
+            "APP_DIR=%q APP_ENV_B64=%q PUBLISH_SYNC_SERVICE_TOKEN_B64=%q OFFICIAL_FEISHU_OVERRIDE=%q OFFICIAL_FEISHU_WEBHOOK_URL_B64=%q OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=%q" \
+            "${APP_DIR:-}" "${APP_ENV_B64:-}" "${PUBLISH_SYNC_SERVICE_TOKEN_B64}" "${OFFICIAL_FEISHU_OVERRIDE}" \
             "${OFFICIAL_FEISHU_WEBHOOK_URL_B64}" "${OFFICIAL_FEISHU_WEBHOOK_SECRET_B64}")"
 
           ssh \

@@ -80,3 +80,89 @@ func TestHealthHandlerFailsClosedWhenArchiveStoreMissing(t *testing.T) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func TestMonitoringAuthAcceptsOnlyAPIKeyOrDedicatedServiceToken(t *testing.T) {
+	previousConfig := config.Env
+	t.Cleanup(func() { config.Env = previousConfig })
+	config.Env.APIKey = "operator-api-key"
+	t.Setenv("PUBLISH_SYNC_SERVICE_TOKEN", "monitor-service-token")
+
+	called := 0
+	handler := requireMonitoringAuth(func(w http.ResponseWriter, _ *http.Request) {
+		called++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	tests := []struct {
+		name       string
+		header     string
+		value      string
+		wantStatus int
+	}{
+		{name: "missing", wantStatus: http.StatusUnauthorized},
+		{name: "wrong", header: "X-Publish-Sync-Token", value: "wrong", wantStatus: http.StatusUnauthorized},
+		{name: "api key", header: "X-API-Key", value: "operator-api-key", wantStatus: http.StatusNoContent},
+		{name: "service token", header: "X-Publish-Sync-Token", value: "monitor-service-token", wantStatus: http.StatusNoContent},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/api/wechat/official/monitoring", nil)
+			if test.header != "" {
+				request.Header.Set(test.header, test.value)
+			}
+			recorder := httptest.NewRecorder()
+			handler(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	if called != 2 {
+		t.Fatalf("handler called %d times, want 2", called)
+	}
+}
+
+func TestMonitoringAuthFailsClosedWhenNoCredentialIsConfigured(t *testing.T) {
+	previousConfig := config.Env
+	t.Cleanup(func() { config.Env = previousConfig })
+	config.Env.APIKey = ""
+	t.Setenv("PUBLISH_SYNC_SERVICE_TOKEN", "")
+
+	called := false
+	handler := requireMonitoringAuth(func(http.ResponseWriter, *http.Request) { called = true })
+	recorder := httptest.NewRecorder()
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/api/wechat/official/monitoring", nil))
+	if recorder.Code != http.StatusServiceUnavailable || called {
+		t.Fatalf("status=%d called=%v body=%s", recorder.Code, called, recorder.Body.String())
+	}
+}
+
+func TestServiceTokenCannotReachBroadOfficialEndpoints(t *testing.T) {
+	previousConfig := config.Env
+	t.Cleanup(func() { config.Env = previousConfig })
+	config.Env.APIKey = "operator-api-key"
+	t.Setenv("PUBLISH_SYNC_SERVICE_TOKEN", "monitor-service-token")
+
+	called := false
+	handler := requireAPIKey(func(http.ResponseWriter, *http.Request) { called = true })
+	request := httptest.NewRequest(http.MethodGet, "/api/wechat/official/status", nil)
+	request.Header.Set("X-Publish-Sync-Token", "monitor-service-token")
+	recorder := httptest.NewRecorder()
+	handler(recorder, request)
+	if recorder.Code != http.StatusUnauthorized || called {
+		t.Fatalf("status=%d called=%v body=%s", recorder.Code, called, recorder.Body.String())
+	}
+}
+
+func TestBroadOfficialEndpointsFailClosedWhenAPIKeyIsMissing(t *testing.T) {
+	previousConfig := config.Env
+	t.Cleanup(func() { config.Env = previousConfig })
+	config.Env.APIKey = ""
+
+	called := false
+	handler := requireAPIKey(func(http.ResponseWriter, *http.Request) { called = true })
+	recorder := httptest.NewRecorder()
+	handler(recorder, httptest.NewRequest(http.MethodGet, "/api/wechat/official/status", nil))
+	if recorder.Code != http.StatusServiceUnavailable || called {
+		t.Fatalf("status=%d called=%v body=%s", recorder.Code, called, recorder.Body.String())
+	}
+}

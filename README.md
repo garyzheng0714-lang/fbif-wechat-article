@@ -152,7 +152,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - 报告通道二选一：优先使用 `OFFICIAL_FEISHU_WEBHOOK_URL`（飞书自定义机器人 HTTPS 地址）与可选的 `OFFICIAL_FEISHU_WEBHOOK_SECRET`；未配置 webhook 时，使用 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`OFFICIAL_FEISHU_CHAT_ID` 由应用机器人发到指定群
 - `ANALYTICS_DEFERRED_RETRY_MINUTES`，官方返回 `is_delay` 后的重试间隔，默认 `30`
 - `ANALYTICS_DEFERRED_MAX_RETRIES`，延迟窗口有界重试次数，默认 `3`；耗尽后告警，不推进覆盖游标
-- `GET /api/wechat/official/monitoring` 是 `API_KEY` 保护的紧凑监控入口；仓库内 `External Sync Watchdog` 每 15 分钟经 SSH 隧道联合探测 112、feed 与排版工具，并对持续故障/恢复去重通知
+- `GET /api/wechat/official/monitoring` 是紧凑监控入口，只接受运维 `API_KEY` 或最小权限 `PUBLISH_SYNC_SERVICE_TOKEN`；服务令牌不能访问 status、coverage 或任何写接口。仓库内 `External Sync Watchdog` 每 15 分钟经 SSH 隧道联合探测 112、feed 与排版工具，并对持续故障/恢复去重通知
 
 公众号群发结果回调（兼容代码保留，本方案不启用）：
 
@@ -211,7 +211,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 | `POST` | `/api/feishu/official-sync` | 仅在历史覆盖审计已通过并经人工确认后，批量增量写入 Base。 | `API_KEY` |
 | `GET` | `/api/feishu/cursor` | 查看同步进度 cursor。 | `API_KEY` |
 | `GET` | `/api/wechat/official/status` | 查看 15 个现役接口、6 个下线接口、回填游标和存储统计。 | `API_KEY` |
-| `GET` | `/api/wechat/official/monitoring` | 查看端点新鲜度、`freepublish` 最新页心跳、延迟窗口、自动排版 outbox 与日报配置。 | `API_KEY` |
+| `GET` | `/api/wechat/official/monitoring` | 查看端点新鲜度、`freepublish` 最新页心跳、延迟窗口、自动排版 outbox 与日报配置。 | `API_KEY` 或 `PUBLISH_SYNC_SERVICE_TOKEN` |
 | `GET` | `/api/wechat/official/coverage` | 查看多接口文章身份并集、关联缺口、回填覆盖和 Base 门禁状态。 | `API_KEY` |
 | `POST` | `/api/wechat/official/coverage` | 仅在 `eligibleForUserApproval=true` 后，携带合同版本、确认短语和确认人完成显式确认。 | `API_KEY` |
 | `DELETE` | `/api/wechat/official/coverage` | 撤销历史覆盖确认并立即关闭 Base 门禁。 | `API_KEY` |

@@ -35,6 +35,10 @@ type API interface {
 	SubmitOfficial(ctx context.Context, article Article) (Receipt, error)
 }
 
+type URLAPI interface {
+	SubmitURL(ctx context.Context, articleURL string) (Receipt, error)
+}
+
 type HTTPAPI struct {
 	Endpoint      string
 	AdminPassword string
@@ -83,6 +87,66 @@ func (c *HTTPAPI) SubmitOfficial(ctx context.Context, article Article) (Receipt,
 	}
 	if response.Job.ID <= 0 {
 		return Receipt{}, fmt.Errorf("layout official-sync returned no job id")
+	}
+	return Receipt{JobID: response.Job.ID, Stage: response.Job.Stage, Existing: response.Existing}, nil
+}
+
+// SubmitURL sends a published WeChat article URL through the layout service's
+// URL-import endpoint. MASSSENDJOBFINISH contains URLs, not the full official
+// article body used by SubmitOfficial.
+func (c *HTTPAPI) SubmitURL(ctx context.Context, articleURL string) (Receipt, error) {
+	if _, err := CanonicalSourceKey(articleURL); err != nil {
+		return Receipt{}, err
+	}
+	endpoint, err := url.Parse(c.Endpoint)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return Receipt{}, fmt.Errorf("layout official-sync endpoint is invalid")
+	}
+	endpoint.Path = "/api/publish/site-sync"
+	endpoint.RawPath = ""
+	endpoint.RawQuery = ""
+	endpoint.Fragment = ""
+	body, err := json.Marshal(map[string]string{"url": articleURL})
+	if err != nil {
+		return Receipt{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return Receipt{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Admin-Password", c.AdminPassword)
+	client := c.Client
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Receipt{}, err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return Receipt{}, err
+	}
+	var response struct {
+		Job struct {
+			ID    int64  `json:"id"`
+			Stage string `json:"stage"`
+		} `json:"job"`
+		Existing bool   `json:"existing"`
+		Error    string `json:"error"`
+	}
+	_ = json.Unmarshal(responseBody, &response)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		message := strings.TrimSpace(response.Error)
+		if message == "" {
+			message = strings.TrimSpace(string(responseBody))
+		}
+		return Receipt{}, fmt.Errorf("layout site-sync HTTP %d: %s", resp.StatusCode, message)
+	}
+	if response.Job.ID <= 0 {
+		return Receipt{}, fmt.Errorf("layout site-sync returned no job id")
 	}
 	return Receipt{JobID: response.Job.ID, Stage: response.Job.Stage, Existing: response.Existing}, nil
 }
@@ -237,6 +301,17 @@ func (d *Dispatcher) Status(ctx context.Context) (*Status, error) {
 		status.Reason = "存在无法由官方草稿类型确认的已发布内容；为防止小绿书误投，已暂停自动排版"
 	}
 	return status, nil
+}
+
+func (d *Dispatcher) SubmitURL(ctx context.Context, articleURL string) (Receipt, error) {
+	if d == nil || d.Client == nil {
+		return Receipt{}, fmt.Errorf("auto-layout dispatcher is not configured")
+	}
+	client, ok := d.Client.(URLAPI)
+	if !ok {
+		return Receipt{}, fmt.Errorf("auto-layout client does not support URL import")
+	}
+	return client.SubmitURL(ctx, articleURL)
 }
 
 func (d *Dispatcher) candidates(ctx context.Context, notBefore int64) ([]archive.LayoutCandidate, int, int, error) {

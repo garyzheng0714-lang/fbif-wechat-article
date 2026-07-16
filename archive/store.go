@@ -206,6 +206,75 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_official_layout_outbox_due
 			ON official_layout_outbox(status, next_attempt_at, created_at)`,
+		`CREATE TABLE IF NOT EXISTS official_publish_events (
+			event_key TEXT PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			to_user_name TEXT NOT NULL DEFAULT '',
+			from_user_name TEXT NOT NULL DEFAULT '',
+			create_time INTEGER NOT NULL DEFAULT 0,
+			msg_type TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT '',
+			total_count INTEGER NOT NULL DEFAULT 0,
+			filter_count INTEGER NOT NULL DEFAULT 0,
+			sent_count INTEGER NOT NULL DEFAULT 0,
+			error_count INTEGER NOT NULL DEFAULT 0,
+			copyright_count INTEGER NOT NULL DEFAULT 0,
+			copyright_check_state INTEGER NOT NULL DEFAULT 0,
+			raw_xml BLOB NOT NULL,
+			event_xml BLOB NOT NULL,
+			first_seen_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_publish_events_seen
+			ON official_publish_events(last_seen_at, msg_id)`,
+		`CREATE TABLE IF NOT EXISTS official_publish_event_payloads (
+			event_key TEXT NOT NULL,
+			payload_sha256 TEXT NOT NULL,
+			raw_xml BLOB NOT NULL,
+			event_xml BLOB NOT NULL,
+			first_seen_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL,
+			receive_count INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY(event_key, payload_sha256),
+			FOREIGN KEY(event_key) REFERENCES official_publish_events(event_key)
+		)`,
+		`CREATE TABLE IF NOT EXISTS official_publish_event_articles (
+			event_key TEXT NOT NULL,
+			article_index INTEGER NOT NULL,
+			source_key TEXT NOT NULL,
+			source_url TEXT NOT NULL,
+			status TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at INTEGER NOT NULL DEFAULT 0,
+			layout_job_id INTEGER NOT NULL DEFAULT 0,
+			layout_stage TEXT NOT NULL DEFAULT '',
+			existing_job INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			delivered_at INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY(event_key, article_index),
+			UNIQUE(source_key),
+			FOREIGN KEY(event_key) REFERENCES official_publish_events(event_key)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_official_publish_event_articles_due
+			ON official_publish_event_articles(status, next_attempt_at, created_at)`,
+		`CREATE TABLE IF NOT EXISTS official_publish_event_copyright_articles (
+			event_key TEXT NOT NULL,
+			article_index INTEGER NOT NULL,
+			user_declare_state INTEGER NOT NULL DEFAULT 0,
+			audit_state INTEGER NOT NULL DEFAULT 0,
+			original_article_url TEXT NOT NULL DEFAULT '',
+			original_article_type INTEGER NOT NULL DEFAULT 0,
+			can_reprint INTEGER NOT NULL DEFAULT 0,
+			need_replace_content INTEGER NOT NULL DEFAULT 0,
+			need_show_reprint_source INTEGER NOT NULL DEFAULT 0,
+			first_seen_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL,
+			PRIMARY KEY(event_key, article_index),
+			FOREIGN KEY(event_key) REFERENCES official_publish_events(event_key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS official_base_records (
 			dataset TEXT NOT NULL,
 			row_key TEXT NOT NULL,
@@ -666,6 +735,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "official_layout_outbox", "published_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_publish_events", "event_xml", "BLOB NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_publish_events", "copyright_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_publish_events", "copyright_check_state", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "official_api_state", "backfill_direction", "TEXT NOT NULL DEFAULT ''"); err != nil {

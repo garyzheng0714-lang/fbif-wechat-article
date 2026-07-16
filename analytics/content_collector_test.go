@@ -123,7 +123,7 @@ func TestContentCollectorArchivesOnlyPublishedInventoryAndLatestDraftType(t *tes
 	}
 }
 
-func TestRefreshPublishedCapturesDraftTypeBeforePublishedPage(t *testing.T) {
+func TestRefreshPublishedDoesNotDependOnDraftAPI(t *testing.T) {
 	store, err := archive.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -134,18 +134,18 @@ func TestRefreshPublishedCapturesDraftTypeBeforePublishedPage(t *testing.T) {
 	if _, err := collector.RefreshPublished(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"draft_batchget", "freepublish_batchget"}
+	want := []string{"freepublish_batchget"}
 	if len(client.calls) != len(want) {
 		t.Fatalf("calls=%v want=%v", client.calls, want)
 	}
 	for i := range want {
 		if client.calls[i] != want[i] {
-			t.Fatalf("自动排版轮询必须先留官方草稿类型：calls=%v", client.calls)
+			t.Fatalf("已发布轮询不得被草稿 API 阻断：calls=%v", client.calls)
 		}
 	}
-	typed, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'draft' AND article_type = 'news'`)
-	if err != nil || typed != 1 {
-		t.Fatalf("official draft article_type not persisted: typed=%d err=%v", typed, err)
+	published, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'freepublish'`)
+	if err != nil || published != 1 {
+		t.Fatalf("official published page not persisted: published=%d err=%v", published, err)
 	}
 }
 

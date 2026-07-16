@@ -367,22 +367,18 @@ func (c *ContentCollector) CallAndArchive(ctx context.Context, endpointName stri
 	return c.callAndArchiveResponse(ctx, endpointName, payload, "", "")
 }
 
-// RefreshPublished 供 15 分钟自动排版轮询使用：必须先刷新 draft
-// 最新一页，保留 article_type=news|newspic 的官方分类快照，再刷新
-// freepublish 最新一页。任一步仍经官方 API、原始响应归档和内容表落库，
-// 不启动历史回填；draft 刷新失败时 fail closed，不拉取新的已发布候选。
+// RefreshPublished 供 15 分钟已发布监控使用：只刷新 freepublish
+// 最新一页，经官方 API、原始响应归档和内容表落库，不启动历史回填。
+// draft 仅由完整内容采集用于 news/newspic 类型补充，不再是已发布
+// 发现的前置条件。
 func (c *ContentCollector) RefreshPublished(ctx context.Context) (archive.ContentPageInfo, error) {
 	if !c.runMu.TryLock() {
 		return archive.ContentPageInfo{}, fmt.Errorf("content collector is already running")
 	}
 	defer c.runMu.Unlock()
-	draftStream, hasDraftStream := contentStreamByName("draft")
-	publishedStream, hasPublishedStream := contentStreamByName("freepublish")
-	if !hasDraftStream || !hasPublishedStream {
-		return archive.ContentPageInfo{}, fmt.Errorf("draft/freepublish content streams are not configured")
-	}
-	if _, err := c.fetchPage(ctx, draftStream, 0, false); err != nil {
-		return archive.ContentPageInfo{}, fmt.Errorf("refresh official draft types: %w", err)
+	publishedStream, ok := contentStreamByName("freepublish")
+	if !ok {
+		return archive.ContentPageInfo{}, fmt.Errorf("freepublish content stream is not configured")
 	}
 	return c.fetchPage(ctx, publishedStream, 0, false)
 }

@@ -98,7 +98,8 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 		contentMinimum = 2
 	}
 
-	// 工作时段内先刷新最新已发布文章和图集类型；时段外只推进历史详情，
+	// 工作时段内的完整采集会刷新最新已发布文章并补充图集类型；
+	// 时段外只推进历史详情，
 	// 不调用最新草稿与发布页。两者都为今天余下的工作时段轮询留出预算。
 	contentConfiguredMax := r.Content.MaxCalls
 	quotaBeforeContent := wechat.CurrentDailyQuotaStatus()
@@ -158,13 +159,15 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 }
 
 // quotaAwareCallBudget 把 98% 可用额度再分为“今天余下的发布轮询”和“本次回填”。
-// minimum 只用于内容采集，保证还有额度时至少能完成 draft + freepublish 最新页。
+// minimum 只用于完整内容采集，保证还有额度时至少能完成
+// draft 类型补充 + freepublish 最新页。15 分钟发布监控本身只消耗一次
+// freepublish 调用。
 func quotaAwareCallBudget(configuredMax, usableRemaining int, now time.Time, pollInterval time.Duration, layoutEnabled bool, minimum int) (budget int, pollReserve int) {
 	if configuredMax <= 0 || usableRemaining <= 0 {
 		return 0, 0
 	}
 	if layoutEnabled && pollInterval > 0 {
-		pollReserve = remainingLayoutPollsToday(now, pollInterval) * 2
+		pollReserve = remainingLayoutPollsToday(now, pollInterval)
 	}
 	availableForRun := usableRemaining - pollReserve
 	if availableForRun < minimum {
@@ -304,7 +307,7 @@ func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {
 	next := nextLayoutPoll(time.Now(), interval)
 	timer := time.NewTimer(time.Until(next))
 	defer timer.Stop()
-	log.Printf("[AutoLayout] Polling official draft types + freepublish every %s between 08:30 and 18:30; next at %s", interval, next.Format("2006-01-02 15:04:05"))
+	log.Printf("[AutoLayout] Polling official freepublish every %s between 08:30 and 18:30; next at %s", interval, next.Format("2006-01-02 15:04:05"))
 	for {
 		select {
 		case <-timer.C:

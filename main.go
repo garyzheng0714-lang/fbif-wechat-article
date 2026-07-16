@@ -16,12 +16,14 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/analytics"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/officialbase"
+	"github.com/garyzheng0714-lang/fbif-wechat-article/publishcallback"
 	appSync "github.com/garyzheng0714-lang/fbif-wechat-article/sync"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
 var officialRuntime *analytics.Runtime
 var officialBaseSyncer *officialbase.Syncer
+var officialPublishCallback *publishcallback.Service
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
@@ -51,6 +53,17 @@ func main() {
 		}
 		return
 	}
+	if officialRuntime != nil {
+		callbackService, err := publishcallback.NewFromEnv(
+			officialRuntime.Store,
+			officialRuntime.Layout,
+			config.Env.WechatAppID,
+		)
+		if err != nil {
+			log.Fatalf("initialize WeChat publish callback: %v", err)
+		}
+		officialPublishCallback = callbackService
+	}
 
 	mux := http.NewServeMux()
 	if !ossConfigured() {
@@ -75,6 +88,7 @@ func main() {
 	mux.HandleFunc("/api/wechat/official/endpoints", requireAPIKey(officialEndpointsHandler))
 	mux.HandleFunc("/api/wechat/official/collect", requireAPIKey(officialCollectHandler))
 	mux.HandleFunc("/api/wechat/official/call", requireAPIKey(officialCallHandler))
+	mux.HandleFunc("/api/wechat/publish-callback", officialPublishCallbackHandler)
 
 	stopCh := make(chan struct{})
 	if featureEnabled("ENABLE_FEISHU_SYNC", false) {
@@ -82,6 +96,10 @@ func main() {
 	}
 	if officialRuntime != nil {
 		officialRuntime.Start(stopCh)
+	}
+	if officialPublishCallback != nil {
+		officialPublishCallback.Start(stopCh)
+		log.Println("[PublishCallback] official MASSSENDJOBFINISH callback enabled")
 	}
 	if officialbase.Enabled() {
 		if officialRuntime == nil {
@@ -108,6 +126,14 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+func officialPublishCallbackHandler(w http.ResponseWriter, r *http.Request) {
+	if officialPublishCallback == nil {
+		http.Error(w, "publish callback is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	officialPublishCallback.ServeHTTP(w, r)
 }
 
 func officialBaseSyncHandler(w http.ResponseWriter, r *http.Request) {

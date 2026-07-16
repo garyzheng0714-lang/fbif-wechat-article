@@ -10,19 +10,19 @@ import (
 func TestQuotaAwareCallBudgetReservesEveryRemainingLayoutPoll(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, wechat.ShanghaiLoc())
 	budget, reserve := quotaAwareCallBudget(2000, 815, now, 15*time.Minute, true, 0)
-	if reserve != 52 || budget != 763 {
-		t.Fatalf("budget=%d reserve=%d, want 763/52", budget, reserve)
+	if reserve != 26 || budget != 789 {
+		t.Fatalf("budget=%d reserve=%d, want 789/26", budget, reserve)
 	}
 }
 
 func TestQuotaAwareCallBudgetHonorsConfiguredCapAndContentMinimum(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, wechat.ShanghaiLoc())
 	budget, reserve := quotaAwareCallBudget(500, 815, now, 15*time.Minute, true, 0)
-	if budget != 500 || reserve != 52 {
+	if budget != 500 || reserve != 26 {
 		t.Fatalf("configured cap not honored: budget=%d reserve=%d", budget, reserve)
 	}
 	budget, reserve = quotaAwareCallBudget(400, 1, now, 15*time.Minute, true, 2)
-	if budget != 1 || reserve != 52 {
+	if budget != 1 || reserve != 26 {
 		t.Fatalf("content must use the one still-available call without crossing the hard cap: budget=%d reserve=%d", budget, reserve)
 	}
 }

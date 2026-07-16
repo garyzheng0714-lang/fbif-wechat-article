@@ -286,6 +286,36 @@ func TestHTTPAPISendsAdminPasswordAndOfficialBody(t *testing.T) {
 	}
 }
 
+func TestHTTPAPISubmitURLUsesSiteSync(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/publish/site-sync" {
+			t.Errorf("path=%q", r.URL.Path)
+		}
+		if r.Header.Get("X-Admin-Password") != "secret" {
+			t.Errorf("admin password header missing")
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if body["url"] != "https://mp.weixin.qq.com/s/url-import" {
+			t.Errorf("url mismatch: %#v", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"job":{"id":89,"stage":"enriching"},"existing":true}`)
+	}))
+	defer server.Close()
+	client := &HTTPAPI{
+		Endpoint:      server.URL + "/api/publish/official-sync",
+		AdminPassword: "secret",
+		Client:        server.Client(),
+	}
+	receipt, err := client.SubmitURL(context.Background(), "https://mp.weixin.qq.com/s/url-import")
+	if err != nil || receipt.JobID != 89 || receipt.Stage != "enriching" || !receipt.Existing {
+		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+}
+
 func TestCanonicalSourceKeyMatchesLayoutIdentity(t *testing.T) {
 	a, err := CanonicalSourceKey("http://mp.weixin.qq.com/s?__biz=MzA3&mid=2&idx=1&sn=a&chksm=x#rd")
 	if err != nil {

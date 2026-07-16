@@ -23,7 +23,7 @@
 - 自动内容归档只遍历 `freepublish/batchget` 已发布文章，并逐篇调用 `freepublish/getarticle` 保存详情接口全部字段；草稿最新页只用于读取 `article_type`，素材库不参与历史同步。
 - 所有响应先按原始字节写入 SQLite，再生成可查询的文章指标行；微信新增字段无需改结构即可留存。
 - 每天 `00:05` 在上海时区额度刷新后立即抓昨天及最近 30 天仍会变化的数据，再在保留每日 2% 官方额度后，从新到旧断点回填。
-- 每天北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟先轮询官方 `draft/batchget` 保留文章类型，再轮询 `freepublish/batchget`；区间外不轮询新文章。只有官方确认为普通图文 `article_type=news` 的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
+- 每天北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟独立轮询官方 `freepublish/batchget`；区间外不轮询新文章，`draft` 接口失败不会阻断已发布轮询。只有被可靠类型信号确认为普通图文的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
 - 已发布文章、文章指标、粉丝指标、评论和同步状态先完整落 SQLite；Base 同步显式开启后再批量增量写入。
 - 官方 API 采集器启动后自动执行一次，此后每天 `00:05` 再次执行；旧直连飞书 scheduler 已停用。
 - 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
@@ -147,6 +147,11 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`，默认 `15`；只在北京时间 `08:30` 至 `18:30`（含首尾）生效
 - `AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN`，默认 `20`
 
+公众号群发结果回调（默认关闭）：
+
+- 仅配置 `WECHAT_CALLBACK_TOKEN` 后才启用 `/api/wechat/publish-callback`；安全模式再配置 `WECHAT_CALLBACK_AES_KEY`，`WECHAT_CALLBACK_APP_ID` 不填时沿用 `WECHAT_APPID`
+- 该回调用于补充 `freepublish` 无法覆盖的群发结果事件；启用公众号统一“服务器配置”前，必须先迁移并验证现有自动回复、菜单及其他回调，禁止直接覆盖线上配置
+
 常用可选项：
 
 - `SERVER_PORT`，默认 `3002`
@@ -204,6 +209,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 | `GET` | `/api/wechat/official/endpoints` | 查看全部数据与内容接口清单、生命周期和必填标识符。 | `API_KEY` |
 | `POST` | `/api/wechat/official/collect` | 立即执行一次完整增量采集。 | `API_KEY` |
 | `POST` | `/api/wechat/official/call` | 调用白名单内单个官方接口并归档原始响应。 | `API_KEY` |
+| `GET/POST` | `/api/wechat/publish-callback` | 微信群发结果回调；默认关闭，启用后按微信签名或安全模式 AES 验证。 | 微信回调签名 |
 
 受保护接口支持两种鉴权方式：
 
@@ -236,7 +242,7 @@ X-API-Key: <token>
 ### 自动排版
 
 - 第一次启用时，库内已有 `freepublish` 文章只登记为历史基线，不会批量创建旧稿。
-- 此后仅在北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟刷新 `draft/batchget` 最新页的 `article_type`，再刷新 `freepublish/batchget` 最新页；区间外不轮询新文章，多图文中的每篇文章独立去重和投递。
+- 此后仅在北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟刷新 `freepublish/batchget` 最新页；`draft/batchget` 只由完整内容采集用于补充官方类型快照，不再是已发布轮询的前置条件。区间外不轮询新文章，多图文中的每篇文章独立去重和投递。
 - `article_type=news` 才允许进网站；`newspic` 只记录跳过；已发布接口未返回类型且无法与官方草稿快照严格匹配时，服务健康状态报警且绝不自动投递。
 - `freepublish` 历史分页在详情和评论之前获得专用预算，避免每日调用上限导致历史永久无法回填。
 - 标题、作者、正文 HTML、封面和文章 URL 全部取自官方响应；只有链接、没有官方正文的数据分析记录不会进入排版。

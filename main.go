@@ -84,6 +84,7 @@ func main() {
 	mux.HandleFunc("/api/feishu/official-sync", requireAPIKey(officialBaseSyncHandler))
 	mux.HandleFunc("/api/feishu/cursor", requireAPIKey(cursorHandler))
 	mux.HandleFunc("/api/wechat/official/status", requireAPIKey(officialStatusHandler))
+	mux.HandleFunc("/api/wechat/official/monitoring", requireAPIKey(officialMonitoringHandler))
 	mux.HandleFunc("/api/wechat/official/coverage", requireAPIKey(officialCoverageHandler))
 	mux.HandleFunc("/api/wechat/official/endpoints", requireAPIKey(officialEndpointsHandler))
 	mux.HandleFunc("/api/wechat/official/collect", requireAPIKey(officialCollectHandler))
@@ -212,15 +213,37 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		"reason": "官方 API 采集器已禁用",
 	})
 	if officialRuntime != nil {
-		status, err := officialRuntime.Status(r.Context())
-		if err != nil {
-			officialStatus = map[string]interface{}{"ready": false, "error": err.Error()}
+		// /health 只做有界的进程、凭证和存储活性检查。完整 endpoint 状态与
+		// 历史覆盖审计可能扫描大表，必须留在受 API_KEY 保护的 status/coverage
+		// 端点，不能让负载均衡和部署 readiness 被重查询拖住。
+		healthCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		credentialsConfigured := config.Env.WechatAppID != "" && config.Env.WechatSecret != ""
+		storeAvailable := false
+		reason := ""
+		if officialRuntime.Store == nil {
+			reason = "官方归档存储未配置"
+		} else if _, err := officialRuntime.Store.QueryInt64(healthCtx, `SELECT 1`); err != nil {
+			reason = "官方归档存储不可用"
 		} else {
-			officialStatus = status
-			if status.Ready {
-				statusCode = http.StatusOK
-				statusLabel = "ok"
-			}
+			storeAvailable = true
+		}
+		if !credentialsConfigured {
+			reason = "WeChat AppID/AppSecret 未配置"
+		}
+		reportingConfigured := officialRuntime.Reporter != nil && officialRuntime.Reporter.Configured()
+		ready := credentialsConfigured && storeAvailable
+		officialStatus = map[string]interface{}{
+			"ready":                 ready,
+			"readySemantics":        "ready 仅表示进程、凭证和归档存储可运行；历史口径只看受保护 coverage 接口",
+			"credentialsConfigured": credentialsConfigured,
+			"storeAvailable":        storeAvailable,
+			"reportingConfigured":   reportingConfigured,
+			"reason":                reason,
+		}
+		if ready {
+			statusCode = http.StatusOK
+			statusLabel = "ok"
 		}
 	}
 	writeJSON(w, statusCode, map[string]interface{}{
@@ -270,6 +293,25 @@ func officialStatusHandler(w http.ResponseWriter, r *http.Request) {
 		statusCode = http.StatusServiceUnavailable
 	}
 	writeJSON(w, statusCode, map[string]interface{}{"success": status.Ready, "status": status})
+}
+
+func officialMonitoringHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"success": false, "error": "GET only"})
+		return
+	}
+	if officialRuntime == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "official API collector disabled"})
+		return
+	}
+	monitorCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	status, err := officialRuntime.MonitoringStatus(monitorCtx, time.Now())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": "official monitoring unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func officialCoverageHandler(w http.ResponseWriter, r *http.Request) {

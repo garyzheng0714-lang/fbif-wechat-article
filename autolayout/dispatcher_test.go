@@ -32,6 +32,20 @@ func (f *fakeLayoutAPI) SubmitOfficial(_ context.Context, article Article) (Rece
 	return Receipt{JobID: int64(100 + len(f.articles)), Stage: "rendering"}, nil
 }
 
+func TestNewFromEnvRequiresHTTPSOutsideLoopback(t *testing.T) {
+	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
+	t.Setenv("PUBLISH_SYNC_SERVICE_TOKEN", "test-service-token")
+	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "http://layout.example.com/api/publish/official-sync")
+	if _, err := NewFromEnv(nil); err == nil {
+		t.Fatal("remote plain HTTP endpoint must be rejected")
+	}
+
+	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "http://127.0.0.1:9001/api/publish/official-sync")
+	if dispatcher, err := NewFromEnv(nil); err != nil || dispatcher == nil {
+		t.Fatalf("local loopback endpoint should remain available for tests: dispatcher=%v err=%v", dispatcher, err)
+	}
+}
+
 func savePublishedArticle(t *testing.T, store *archive.Store, articleID, title, articleURL string, now time.Time) {
 	t.Helper()
 	body, err := json.Marshal(map[string]interface{}{
@@ -263,23 +277,29 @@ func TestDispatcherSkipsNewspicWhenOnlyStableIdentityIsTitleAndIndex(t *testing.
 	}
 }
 
-func TestHTTPAPISendsAdminPasswordAndOfficialBody(t *testing.T) {
+func TestHTTPAPISendsServiceTokenAndOfficialBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Admin-Password") != "secret" {
-			t.Errorf("admin password header missing")
+		if r.Header.Get("X-Publish-Sync-Token") != "service-token" {
+			t.Errorf("service token header missing")
 		}
-		var article Article
-		if err := json.NewDecoder(r.Body).Decode(&article); err != nil {
+		var body struct {
+			Article
+			ContentKind       string `json:"content_kind"`
+			Classification    string `json:"classification"`
+			ClassifierVersion string `json:"classifier_version"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode: %v", err)
 		}
-		if article.ContentHTML != "<p>正文</p>" {
-			t.Errorf("official body mismatch: %q", article.ContentHTML)
+		if body.ContentHTML != "<p>正文</p>" || body.ContentKind != "article" ||
+			body.Classification != "ordinary_confirmed" || body.ClassifierVersion == "" {
+			t.Errorf("official body/evidence mismatch: %+v", body)
 		}
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"job":{"id":88,"stage":"rendering"},"existing":false}`)
 	}))
 	defer server.Close()
-	client := &HTTPAPI{Endpoint: server.URL, AdminPassword: "secret", Client: server.Client()}
+	client := &HTTPAPI{Endpoint: server.URL, ServiceToken: "service-token", Client: server.Client()}
 	receipt, err := client.SubmitOfficial(context.Background(), Article{URL: "https://mp.weixin.qq.com/s/x", ContentHTML: "<p>正文</p>"})
 	if err != nil || receipt.JobID != 88 || receipt.Stage != "rendering" || receipt.Existing {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
@@ -291,8 +311,8 @@ func TestHTTPAPISubmitURLUsesSiteSync(t *testing.T) {
 		if r.URL.Path != "/api/publish/site-sync" {
 			t.Errorf("path=%q", r.URL.Path)
 		}
-		if r.Header.Get("X-Admin-Password") != "secret" {
-			t.Errorf("admin password header missing")
+		if r.Header.Get("X-Publish-Sync-Token") != "service-token" {
+			t.Errorf("service token header missing")
 		}
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -306,13 +326,50 @@ func TestHTTPAPISubmitURLUsesSiteSync(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &HTTPAPI{
-		Endpoint:      server.URL + "/api/publish/official-sync",
-		AdminPassword: "secret",
-		Client:        server.Client(),
+		Endpoint:     server.URL + "/api/publish/official-sync",
+		ServiceToken: "service-token",
+		Client:       server.Client(),
 	}
 	receipt, err := client.SubmitURL(context.Background(), "https://mp.weixin.qq.com/s/url-import")
 	if err != nil || receipt.JobID != 89 || receipt.Stage != "enriching" || !receipt.Existing {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+}
+
+func TestHTTPAPIDoesNotForwardServiceTokenAcrossRedirects(t *testing.T) {
+	targetCalls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls++
+		if r.Header.Get("X-Publish-Sync-Token") != "" {
+			t.Fatalf("service token leaked to redirect target")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	client := &HTTPAPI{Endpoint: redirect.URL, ServiceToken: "service-token", Client: redirect.Client()}
+	if _, err := client.SubmitOfficial(context.Background(), Article{URL: "https://mp.weixin.qq.com/s/x"}); err == nil {
+		t.Fatal("redirect must remain an explicit HTTP error")
+	}
+	if targetCalls != 0 {
+		t.Fatalf("redirect target calls=%d want 0", targetCalls)
+	}
+}
+
+func TestHTTPAPIRejectsAmbiguousEndpoint(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://user@example.com/api/publish/official-sync",
+		"https://example.com/api/publish/official-sync?next=https://attacker.example",
+		"http://example.com/api/publish/official-sync",
+	} {
+		client := &HTTPAPI{Endpoint: endpoint, ServiceToken: "service-token"}
+		if _, err := client.SubmitOfficial(context.Background(), Article{}); err == nil {
+			t.Fatalf("SubmitOfficial endpoint %q must fail", endpoint)
+		}
 	}
 }
 

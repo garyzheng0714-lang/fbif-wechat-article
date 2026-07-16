@@ -40,27 +40,60 @@ type URLAPI interface {
 }
 
 type HTTPAPI struct {
-	Endpoint      string
-	AdminPassword string
-	Client        *http.Client
+	Endpoint     string
+	ServiceToken string
+	Client       *http.Client
+}
+
+func layoutHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	safeClient := *client
+	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &safeClient
+}
+
+func validateLayoutEndpoint(raw string) (*url.URL, error) {
+	endpoint, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return nil, fmt.Errorf("layout official-sync endpoint is invalid")
+	}
+	if endpoint.Scheme != "https" && !layoutLoopbackHost(endpoint.Hostname()) {
+		return nil, fmt.Errorf("layout official-sync endpoint must use HTTPS outside local loopback")
+	}
+	return endpoint, nil
 }
 
 func (c *HTTPAPI) SubmitOfficial(ctx context.Context, article Article) (Receipt, error) {
-	body, err := json.Marshal(article)
+	if strings.TrimSpace(c.ServiceToken) == "" {
+		return Receipt{}, fmt.Errorf("layout official-sync service token is missing")
+	}
+	endpoint, err := validateLayoutEndpoint(c.Endpoint)
 	if err != nil {
 		return Receipt{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(body))
+	body, err := json.Marshal(struct {
+		Article
+		ContentKind       string `json:"content_kind"`
+		Classification    string `json:"classification"`
+		ClassifierVersion string `json:"classifier_version"`
+	}{
+		Article: article, ContentKind: "article",
+		Classification: "ordinary_confirmed", ClassifierVersion: "wechat-official-freepublish-v1",
+	})
+	if err != nil {
+		return Receipt{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
 		return Receipt{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Admin-Password", c.AdminPassword)
-	client := c.Client
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	resp, err := client.Do(req)
+	req.Header.Set("X-Publish-Sync-Token", c.ServiceToken)
+	resp, err := layoutHTTPClient(c.Client).Do(req)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -98,15 +131,21 @@ func (c *HTTPAPI) SubmitURL(ctx context.Context, articleURL string) (Receipt, er
 	if _, err := CanonicalSourceKey(articleURL); err != nil {
 		return Receipt{}, err
 	}
-	endpoint, err := url.Parse(c.Endpoint)
-	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
-		return Receipt{}, fmt.Errorf("layout official-sync endpoint is invalid")
+	if strings.TrimSpace(c.ServiceToken) == "" {
+		return Receipt{}, fmt.Errorf("layout official-sync service token is missing")
+	}
+	endpoint, err := validateLayoutEndpoint(c.Endpoint)
+	if err != nil {
+		return Receipt{}, err
 	}
 	endpoint.Path = "/api/publish/site-sync"
 	endpoint.RawPath = ""
 	endpoint.RawQuery = ""
 	endpoint.Fragment = ""
-	body, err := json.Marshal(map[string]string{"url": articleURL})
+	body, err := json.Marshal(map[string]string{
+		"url": articleURL, "content_kind": "article",
+		"classification": "ordinary_confirmed", "classifier_version": "wechat-official-event-v1",
+	})
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -115,12 +154,8 @@ func (c *HTTPAPI) SubmitURL(ctx context.Context, articleURL string) (Receipt, er
 		return Receipt{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Admin-Password", c.AdminPassword)
-	client := c.Client
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	resp, err := client.Do(req)
+	req.Header.Set("X-Publish-Sync-Token", c.ServiceToken)
+	resp, err := layoutHTTPClient(c.Client).Do(req)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -183,13 +218,13 @@ func NewFromEnv(store *archive.Store) (*Dispatcher, error) {
 		return nil, nil
 	}
 	endpoint := strings.TrimSpace(os.Getenv("LAYOUT_OFFICIAL_SYNC_URL"))
-	password := strings.TrimSpace(os.Getenv("LAYOUT_ADMIN_PASSWORD"))
-	if endpoint == "" || password == "" {
-		return nil, fmt.Errorf("ENABLE_AUTO_LAYOUT=1 requires LAYOUT_OFFICIAL_SYNC_URL and LAYOUT_ADMIN_PASSWORD")
+	serviceToken := strings.TrimSpace(os.Getenv("PUBLISH_SYNC_SERVICE_TOKEN"))
+	if endpoint == "" || serviceToken == "" {
+		return nil, fmt.Errorf("ENABLE_AUTO_LAYOUT=1 requires LAYOUT_OFFICIAL_SYNC_URL and PUBLISH_SYNC_SERVICE_TOKEN")
 	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
-		return nil, fmt.Errorf("LAYOUT_OFFICIAL_SYNC_URL is invalid")
+	parsed, err := validateLayoutEndpoint(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("LAYOUT_OFFICIAL_SYNC_URL is invalid: %w", err)
 	}
 	if parsed.Path != "/api/publish/official-sync" {
 		return nil, fmt.Errorf("LAYOUT_OFFICIAL_SYNC_URL must end with /api/publish/official-sync")
@@ -200,10 +235,19 @@ func NewFromEnv(store *archive.Store) (*Dispatcher, error) {
 	}
 	return &Dispatcher{
 		Store:         store,
-		Client:        &HTTPAPI{Endpoint: endpoint, AdminPassword: password},
+		Client:        &HTTPAPI{Endpoint: endpoint, ServiceToken: serviceToken},
 		SourceName:    sourceName,
 		MaxDeliveries: envPositiveInt("AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN", 20),
 	}, nil
+}
+
+func layoutLoopbackHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func Enabled() bool {

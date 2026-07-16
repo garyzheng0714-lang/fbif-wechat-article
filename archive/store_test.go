@@ -127,6 +127,59 @@ func TestSaveFetchPreservesRawAndNormalizesArticleMetrics(t *testing.T) {
 	}
 }
 
+func TestDeferredFetchDoesNotAdvanceCursorAndMatchingSuccessClearsIt(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Date(2026, 7, 17, 8, 5, 0, 0, time.FixedZone("CST", 8*60*60))
+	raw := []byte(`{"list":[],"is_delay":"true"}`)
+	if _, err := store.SaveFetch(ctx, FetchRecord{
+		Endpoint:     "getarticleread",
+		Category:     "article",
+		BeginDate:    "2026-07-16",
+		EndDate:      "2026-07-16",
+		ResponseJSON: raw,
+		HTTPStatus:   200,
+		Deferred:     true,
+		FetchedAt:    now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.GetState(ctx, "getarticleread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == nil || !state.DeferredPending || state.LastSuccessAt != 0 || state.NextBackfillDate != "" {
+		t.Fatalf("deferred state=%+v", state)
+	}
+	deferred, err := store.QueryInt64(ctx, `SELECT COUNT(*) FROM official_api_fetches WHERE deferred = 1 AND success = 0`)
+	if err != nil || deferred != 1 {
+		t.Fatalf("deferred fetches=%d err=%v", deferred, err)
+	}
+	rows, err := store.QueryInt64(ctx, `SELECT COUNT(*) FROM official_api_rows WHERE endpoint = 'getarticleread'`)
+	if err != nil || rows != 0 {
+		t.Fatalf("deferred response must not materialize rows: rows=%d err=%v", rows, err)
+	}
+
+	if err := store.MarkSuccess(ctx, "getarticleread", "article", "2026-07-15", "2026-07-15", "", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.GetState(ctx, "getarticleread")
+	if err != nil || state == nil || !state.DeferredPending {
+		t.Fatalf("different-window success must not clear pending delay: state=%+v err=%v", state, err)
+	}
+	if err := store.MarkSuccess(ctx, "getarticleread", "article", "2026-07-16", "2026-07-16", "2026-07-15", now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.GetState(ctx, "getarticleread")
+	if err != nil || state == nil || state.DeferredPending || state.NextBackfillDate != "2026-07-15" {
+		t.Fatalf("matching success must clear delay and advance cursor: state=%+v err=%v", state, err)
+	}
+}
+
 func TestOfficialArticleAndFollowerViewsJoinOfficialTables(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

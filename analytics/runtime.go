@@ -22,8 +22,11 @@ type Runtime struct {
 	Analytics *Collector
 	Content   *ContentCollector
 	Layout    *autolayout.Dispatcher
+	Reporter  Reporter
 
 	runMu sync.Mutex
+
+	deferredWake chan struct{}
 }
 
 type CombinedRunResult struct {
@@ -38,8 +41,10 @@ type RuntimeStatus struct {
 	CredentialsConfigured bool                              `json:"credentialsConfigured"`
 	Analytics             *Status                           `json:"analytics,omitempty"`
 	ContentStates         []archive.ContentState            `json:"contentStates"`
+	EndpointQuotas        []wechat.DailyQuotaStatus         `json:"endpointQuotas"`
 	HistoricalCoverage    *archive.HistoricalCoverageReport `json:"historicalCoverage"`
 	Layout                *autolayout.Status                `json:"layout,omitempty"`
+	ReportingConfigured   bool                              `json:"reportingConfigured"`
 	Reason                string                            `json:"reason,omitempty"`
 	Warnings              []string                          `json:"warnings,omitempty"`
 }
@@ -66,6 +71,8 @@ func NewRuntimeFromEnv() (*Runtime, error) {
 			Store:    store,
 			MaxCalls: envInt("CONTENT_MAX_CALLS_PER_RUN", 400),
 		},
+		deferredWake: make(chan struct{}, 1),
+		Reporter:     NewFeishuReporterFromEnv(),
 	}
 	layoutDispatcher, err := autolayout.NewFromEnv(store)
 	if err != nil {
@@ -90,37 +97,20 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 	defer r.runMu.Unlock()
 
 	result := &CombinedRunResult{}
-	pollInterval := time.Duration(envInt("AUTO_LAYOUT_POLL_INTERVAL_MINUTES", 15)) * time.Minute
 	runNow := time.Now()
 	monitorRecent := withinLayoutMonitoringWindow(runNow)
-	contentMinimum := 0
-	if monitorRecent {
-		contentMinimum = 2
-	}
 
 	// 工作时段内的完整采集会刷新最新已发布文章并补充图集类型；
-	// 时段外只推进历史详情，
-	// 不调用最新草稿与发布页。两者都为今天余下的工作时段轮询留出预算。
-	contentConfiguredMax := r.Content.MaxCalls
-	quotaBeforeContent := wechat.CurrentDailyQuotaStatus()
-	contentBudget, contentPollReserve := quotaAwareCallBudget(
-		contentConfiguredMax, quotaBeforeContent.UsableRemaining, runNow, pollInterval, r.Layout != nil, contentMinimum,
-	)
+	// 时段外只推进历史详情，不调用最新草稿与发布页。各官方接口的
+	// 独立日配额由 wechat quota 层逐次执行，本次 MaxCalls 仅限制单轮负载。
 	var contentErr error
-	if contentBudget > 0 {
-		r.Content.MaxCalls = contentBudget
-		if monitorRecent {
-			result.Content, contentErr = r.Content.Run(ctx)
-		} else {
-			result.Content, contentErr = r.Content.RunBackfill(ctx)
-		}
-		r.Content.MaxCalls = contentConfiguredMax
+	if monitorRecent {
+		result.Content, contentErr = r.Content.Run(ctx)
 	} else {
-		nowMs := time.Now().UnixMilli()
-		result.Content = &ContentRunResult{StartedAt: nowMs, FinishedAt: nowMs}
+		result.Content, contentErr = r.Content.RunBackfill(ctx)
 	}
 	if result.Content != nil {
-		log.Printf("[OfficialContent] monitor_recent=%t budget=%d poll_reserve=%d calls=%d succeeded=%d failed=%d", monitorRecent, contentBudget, contentPollReserve, result.Content.Calls, result.Content.Succeeded, result.Content.Failed)
+		log.Printf("[OfficialContent] monitor_recent=%t max_calls=%d calls=%d succeeded=%d failed=%d", monitorRecent, r.Content.MaxCalls, result.Content.Calls, result.Content.Succeeded, result.Content.Failed)
 	}
 	if contentErr != nil {
 		log.Printf("[OfficialContent] Completed with errors: %v", contentErr)
@@ -136,44 +126,12 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 		}
 	}
 
-	// 内容归档完成后，文章/粉丝及其他官方数据接口才使用剩余额度回填。
-	// 预算实时扣除已用量和今天余下的发布轮询；硬保留的 2% 已由 quota 层排除。
-	analyticsConfiguredMax := r.Analytics.MaxCalls
-	quotaBeforeAnalytics := wechat.CurrentDailyQuotaStatus()
-	analyticsBudget, analyticsPollReserve := quotaAwareCallBudget(
-		analyticsConfiguredMax, quotaBeforeAnalytics.UsableRemaining, runNow, pollInterval, r.Layout != nil, 0,
-	)
+	// 内容归档完成后，文章/粉丝及其他官方数据接口分别使用自己的额度回填。
 	var analyticsErr error
-	if analyticsBudget > 0 {
-		r.Analytics.MaxCalls = analyticsBudget
-		result.Analytics, analyticsErr = r.Analytics.Run(ctx)
-		r.Analytics.MaxCalls = analyticsConfiguredMax
-	} else {
-		nowMs := time.Now().UnixMilli()
-		result.Analytics = &RunResult{StartedAt: nowMs, FinishedAt: nowMs, QuotaExhausted: quotaBeforeAnalytics.UsableRemaining == 0}
-	}
-	log.Printf("[OfficialAnalytics] budget=%d poll_reserve=%d quota_used=%d usable_remaining=%d", analyticsBudget, analyticsPollReserve, quotaBeforeAnalytics.Used, quotaBeforeAnalytics.UsableRemaining)
+	result.Analytics, analyticsErr = r.Analytics.Run(ctx)
 	LogRunResult("OfficialAnalytics", result.Analytics, analyticsErr)
 
 	return result, errors.Join(contentErr, layoutErr, analyticsErr)
-}
-
-// quotaAwareCallBudget 把 98% 可用额度再分为“今天余下的发布轮询”和“本次回填”。
-// minimum 只用于完整内容采集，保证还有额度时至少能完成
-// draft 类型补充 + freepublish 最新页。15 分钟发布监控本身只消耗一次
-// freepublish 调用。
-func quotaAwareCallBudget(configuredMax, usableRemaining int, now time.Time, pollInterval time.Duration, layoutEnabled bool, minimum int) (budget int, pollReserve int) {
-	if configuredMax <= 0 || usableRemaining <= 0 {
-		return 0, 0
-	}
-	if layoutEnabled && pollInterval > 0 {
-		pollReserve = remainingLayoutPollsToday(now, pollInterval)
-	}
-	availableForRun := usableRemaining - pollReserve
-	if availableForRun < minimum {
-		availableForRun = min(minimum, usableRemaining)
-	}
-	return min(configuredMax, max(availableForRun, 0)), pollReserve
 }
 
 func (r *Runtime) Status(ctx context.Context) (*RuntimeStatus, error) {
@@ -191,6 +149,7 @@ func (r *Runtime) Status(ctx context.Context) (*RuntimeStatus, error) {
 		return nil, err
 	}
 	status.ContentStates = contentStates
+	status.EndpointQuotas = wechat.CurrentDailyQuotaStatuses()
 	status.HistoricalCoverage, err = r.HistoricalCoverage(ctx)
 	if err != nil {
 		return nil, err
@@ -209,6 +168,10 @@ func (r *Runtime) Status(ctx context.Context) (*RuntimeStatus, error) {
 	}
 	if status.Layout != nil && !status.Layout.Ready {
 		status.Warnings = append(status.Warnings, status.Layout.Reason)
+	}
+	status.ReportingConfigured = r.Reporter != nil && r.Reporter.Configured()
+	if !status.ReportingConfigured {
+		status.Warnings = append(status.Warnings, "官方数据日报/告警未配置 OFFICIAL_FEISHU_WEBHOOK_URL")
 	}
 	if status.HistoricalCoverage != nil && !status.HistoricalCoverage.Verified {
 		status.Warnings = append(status.Warnings, "历史文章覆盖尚未核验；Base 写回保持关闭")
@@ -260,17 +223,39 @@ func (r *Runtime) RequireHistoricalCoverageForBaseSync(ctx context.Context) erro
 }
 
 func (r *Runtime) Start(stopCh <-chan struct{}) {
+	if r.deferredWake == nil {
+		r.deferredWake = make(chan struct{}, 1)
+	}
+	go r.startDeferredRetryWorker(stopCh)
+	if r.Layout != nil {
+		// 调度器必须独立于耗时的历史回填启动；即使初始全量采集失败或很慢，
+		// 08:30—18:30 的 freepublish 最新页轮询仍会按自己的时钟运行。
+		go r.startLayoutPolling(stopCh)
+	}
 	initialDelay := time.Duration(envInt("OFFICIAL_COLLECTOR_INITIAL_DELAY_SECONDS", 5)) * time.Second
 	go func() {
 		timer := time.NewTimer(initialDelay)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			if _, err := r.Run(context.Background()); err != nil {
-				log.Printf("[OfficialCollector] Initial run completed with errors: %v", err)
+			initialNow := time.Now()
+			if r.Layout != nil && withinLayoutMonitoringWindow(initialNow) {
+				layoutResult, layoutErr := r.PollLayout(context.Background())
+				if layoutResult != nil {
+					log.Printf("[AutoLayout] initial poll discovered=%d delivered=%d failed=%d", layoutResult.Discovered, layoutResult.Delivered, layoutResult.Failed)
+				}
+				if layoutErr != nil {
+					log.Printf("[AutoLayout] initial poll completed with errors: %v", layoutErr)
+				}
 			}
-			if r.Layout != nil {
-				go r.startLayoutPolling(stopCh)
+			if dailyCollectionReady(initialNow) {
+				result, err := r.Run(context.Background())
+				if err != nil {
+					log.Printf("[OfficialCollector] Initial run completed with errors: %v", err)
+				}
+				r.signalDeferredRetry(result)
+			} else {
+				log.Printf("[OfficialCollector] Initial D-1 collection deferred until 08:05 Asia/Shanghai")
 			}
 		case <-stopCh:
 			return
@@ -283,9 +268,12 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 			log.Printf("[OfficialCollector] Next run at %s", next.Format("2006-01-02 15:04:05"))
 			select {
 			case <-timer.C:
-				if _, err := r.Run(context.Background()); err != nil {
+				result, err := r.Run(context.Background())
+				if err != nil {
 					log.Printf("[OfficialCollector] Scheduled run completed with errors: %v", err)
 				}
+				r.signalDeferredRetry(result)
+				r.reportDaily(context.Background(), result, err)
 			case <-stopCh:
 				return
 			}
@@ -293,13 +281,88 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 	}()
 }
 
+func (r *Runtime) signalDeferredRetry(result *CombinedRunResult) {
+	if result == nil || result.Analytics == nil || result.Analytics.Deferred == 0 || r.deferredWake == nil {
+		return
+	}
+	select {
+	case r.deferredWake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Runtime) startDeferredRetryWorker(stopCh <-chan struct{}) {
+	interval := time.Duration(envInt("ANALYTICS_DEFERRED_RETRY_MINUTES", 30)) * time.Minute
+	maxRetries := envInt("ANALYTICS_DEFERRED_MAX_RETRIES", 3)
+	for {
+		select {
+		case <-r.deferredWake:
+		case <-stopCh:
+			return
+		}
+
+		for {
+			select {
+			case <-r.deferredWake:
+				continue
+			default:
+			}
+			break
+		}
+
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			timer := time.NewTimer(interval)
+			select {
+			case <-timer.C:
+			case <-stopCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			}
+
+			result, err := r.RetryDeferred(context.Background())
+			LogRunResult(fmt.Sprintf("OfficialAnalyticsDeferredRetry%d", attempt), result, err)
+			status, statusErr := r.Analytics.Status(context.Background())
+			if statusErr != nil {
+				log.Printf("[OfficialAnalytics] deferred status check failed: %v", statusErr)
+				continue
+			}
+			if len(status.DeferredEndpoints) == 0 {
+				break
+			}
+			if attempt == maxRetries {
+				log.Printf("[OfficialAnalytics] deferred windows remain after %d bounded retries: %v", maxRetries, status.DeferredEndpoints)
+				r.reportAlert(context.Background(), fmt.Sprintf("官方数据延迟窗口在 %d 次有界重试后仍未恢复：%v", maxRetries, status.DeferredEndpoints))
+			}
+		}
+	}
+}
+
+func (r *Runtime) RetryDeferred(ctx context.Context) (*RunResult, error) {
+	if !r.runMu.TryLock() {
+		return nil, fmt.Errorf("official API collector is already running")
+	}
+	defer r.runMu.Unlock()
+	return r.Analytics.RetryDeferred(ctx)
+}
+
 func nextScheduledCollection(now time.Time) time.Time {
 	localNow := now.In(wechat.ShanghaiLoc())
-	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 5, 0, 0, wechat.ShanghaiLoc())
+	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 5, 0, 0, wechat.ShanghaiLoc())
 	if !next.After(localNow) {
 		next = next.AddDate(0, 0, 1)
 	}
 	return next
+}
+
+func dailyCollectionReady(now time.Time) bool {
+	localNow := now.In(wechat.ShanghaiLoc())
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 5, 0, 0, wechat.ShanghaiLoc())
+	return !localNow.Before(start)
 }
 
 func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {
@@ -346,24 +409,6 @@ func nextLayoutPoll(now time.Time, interval time.Duration) time.Time {
 		return start.AddDate(0, 0, 1)
 	}
 	return next
-}
-
-func remainingLayoutPollsToday(now time.Time, interval time.Duration) int {
-	if interval <= 0 {
-		return 0
-	}
-	localNow := now.In(wechat.ShanghaiLoc())
-	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 30, 0, 0, wechat.ShanghaiLoc())
-	end := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 18, 30, 0, 0, wechat.ShanghaiLoc())
-	first := start
-	if !localNow.Before(start) {
-		steps := int(localNow.Sub(start)/interval) + 1
-		first = start.Add(time.Duration(steps) * interval)
-	}
-	if first.After(end) {
-		return 0
-	}
-	return int(end.Sub(first)/interval) + 1
 }
 
 // PollLayout 串行执行一次轻量官方发布轮询和 outbox 投递。与完整日采集共用

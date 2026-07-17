@@ -12,9 +12,11 @@ from tools.external_watchdog import (
     evaluate,
     feishu_sign,
     fetch_json,
+    fingerprint,
     load_state,
     run,
     save_state,
+    send_alert_relay,
     send_feishu_app,
     should_notify,
 )
@@ -33,6 +35,12 @@ class ExternalWatchdogTest(unittest.TestCase):
         self.assertFalse(should_notify({"healthy": False, "fingerprint": "a", "notified": True}, False, "a"))
         self.assertTrue(should_notify({"healthy": False, "fingerprint": "a", "notified": True}, False, "b"))
         self.assertTrue(should_notify({"healthy": False, "fingerprint": "a", "notified": True}, True, "c"))
+
+    def test_fingerprint_ignores_volatile_age_and_count_values(self) -> None:
+        self.assertEqual(
+            fingerprint(["feed:poller_stale:181s", "layout:failed_jobs_recent:1"]),
+            fingerprint(["feed:poller_stale:301s", "layout:failed_jobs_recent:2"]),
+        )
 
     def test_state_round_trip_is_atomic_and_signature_is_stable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -122,6 +130,20 @@ class ExternalWatchdogTest(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=2)
             server.server_close()
+
+    def test_alert_relay_uses_service_token_and_structured_payload(self) -> None:
+        with mock.patch("tools.external_watchdog._post_json", return_value={"delivered": True}) as post:
+            send_alert_relay(
+                "https://layout.example/api/publish/monitor-alert",
+                "service-token",
+                "critical",
+                "外部看门狗异常\nfeed:gap:1",
+                2,
+            )
+        args = post.call_args.args
+        self.assertEqual(args[1]["source"], "github-watchdog")
+        self.assertEqual(args[1]["status"], "critical")
+        self.assertEqual(args[2]["X-Publish-Sync-Token"], "service-token")
 
     def test_all_monitoring_requests_use_the_least_privilege_service_token(self) -> None:
         class Handler(BaseHTTPRequestHandler):

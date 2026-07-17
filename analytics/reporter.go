@@ -63,6 +63,19 @@ func NewFeishuReporterFromEnv() Reporter {
 	if appReporter.Configured() {
 		return appReporter
 	}
+	relayURL := strings.TrimSpace(os.Getenv("OFFICIAL_ALERT_RELAY_URL"))
+	if relayURL != "" && !strings.HasPrefix(relayURL, "https://") {
+		log.Printf("[OfficialReporter] OFFICIAL_ALERT_RELAY_URL must use https")
+		relayURL = ""
+	}
+	relayReporter := &AlertRelayReporter{
+		RelayURL:     relayURL,
+		ServiceToken: strings.TrimSpace(os.Getenv("PUBLISH_SYNC_SERVICE_TOKEN")),
+		HTTPClient:   &http.Client{Timeout: 10 * time.Second},
+	}
+	if relayReporter.Configured() {
+		return relayReporter
+	}
 	return nil
 }
 
@@ -140,6 +153,84 @@ type FeishuAppReporter struct {
 	TokenURL   string
 	MessageURL string
 	HTTPClient *http.Client
+}
+
+type AlertRelayReporter struct {
+	RelayURL     string
+	ServiceToken string
+	HTTPClient   *http.Client
+}
+
+func (r *AlertRelayReporter) Configured() bool {
+	return r != nil && strings.TrimSpace(r.RelayURL) != "" && strings.TrimSpace(r.ServiceToken) != ""
+}
+
+func (r *AlertRelayReporter) Send(ctx context.Context, message string) error {
+	if !r.Configured() {
+		return fmt.Errorf("official alert relay reporter is not configured")
+	}
+	lines := strings.Split(strings.TrimSpace(message), "\n")
+	summary := "微信官方数据服务状态更新"
+	details := make([]string, 0, 20)
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+		summary = truncateRunes(strings.Join(strings.Fields(lines[0]), " "), 500)
+	}
+	for _, line := range lines[1:] {
+		line = truncateRunes(strings.Join(strings.Fields(line), " "), 300)
+		if line != "" {
+			details = append(details, line)
+		}
+		if len(details) == 20 {
+			break
+		}
+	}
+	status := "heartbeat"
+	firstLine := ""
+	if len(lines) > 0 {
+		firstLine = lines[0]
+	}
+	if strings.Contains(firstLine, "告警") || strings.Contains(firstLine, "异常") {
+		status = "critical"
+	} else if strings.Contains(firstLine, "恢复") {
+		status = "recovery"
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"source": "wechat-official", "status": status, "summary": summary, "details": details,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.RelayURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("X-Publish-Sync-Token", r.ServiceToken)
+	client := r.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	safeClient := *client
+	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := safeClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send official alert relay report: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if readErr != nil {
+		return readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("official alert relay HTTP %d", resp.StatusCode)
+	}
+	var result struct {
+		Delivered bool `json:"delivered"`
+	}
+	if err := json.Unmarshal(responseBody, &result); err != nil || !result.Delivered {
+		return fmt.Errorf("official alert relay did not confirm delivery")
+	}
+	return nil
 }
 
 func (r *FeishuAppReporter) Configured() bool {

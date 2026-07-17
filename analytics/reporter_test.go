@@ -107,6 +107,65 @@ func TestFeishuReporterFromEnvFallsBackToAppChat(t *testing.T) {
 	}
 }
 
+func TestFeishuReporterFromEnvFallsBackToAlertRelay(t *testing.T) {
+	t.Setenv("OFFICIAL_FEISHU_WEBHOOK_URL", "")
+	t.Setenv("FEISHU_APP_ID", "")
+	t.Setenv("FEISHU_APP_SECRET", "")
+	t.Setenv("OFFICIAL_FEISHU_CHAT_ID", "")
+	t.Setenv("OFFICIAL_ALERT_RELAY_URL", "https://fbifmp-layout.foodtalks.cn/api/publish/monitor-alert")
+	t.Setenv("PUBLISH_SYNC_SERVICE_TOKEN", "relay-secret")
+	if _, ok := NewFeishuReporterFromEnv().(*AlertRelayReporter); !ok {
+		t.Fatal("expected alert relay reporter fallback")
+	}
+}
+
+func TestAlertRelayReporterUsesMachineTokenAndStructuredPayload(t *testing.T) {
+	var payload struct {
+		Source  string   `json:"source"`
+		Status  string   `json:"status"`
+		Summary string   `json:"summary"`
+		Details []string `json:"details"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Publish-Sync-Token") != "relay-secret" {
+			t.Fatalf("service token=%q", r.Header.Get("X-Publish-Sync-Token"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(w, `{"delivered":true}`)
+	}))
+	defer server.Close()
+	reporter := &AlertRelayReporter{RelayURL: server.URL, ServiceToken: "relay-secret", HTTPClient: server.Client()}
+	if err := reporter.Send(context.Background(), "【公众号官方数据告警】\nfailed_endpoints:2\nfreepublish_poll_stale"); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Source != "wechat-official" || payload.Status != "critical" ||
+		!strings.Contains(payload.Summary, "官方数据告警") || len(payload.Details) != 2 {
+		t.Fatalf("relay payload=%+v", payload)
+	}
+}
+
+func TestAlertRelayReporterDoesNotTreatDailyZeroFailuresAsCritical(t *testing.T) {
+	var status string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		status, _ = payload["status"].(string)
+		_, _ = io.WriteString(w, `{"delivered":true}`)
+	}))
+	defer server.Close()
+	reporter := &AlertRelayReporter{RelayURL: server.URL, ServiceToken: "relay-secret", HTTPClient: server.Client()}
+	if err := reporter.Send(context.Background(), "【公众号官方数据日报 2026-07-17】\n调用 15，失败 0。"); err != nil {
+		t.Fatal(err)
+	}
+	if status != "heartbeat" {
+		t.Fatalf("daily report status=%q", status)
+	}
+}
+
 func TestDailyReportStatesExactQuotaAndCoverageSemantics(t *testing.T) {
 	endpoint, _ := wechat.DataCubeEndpointByName("getarticleread")
 	report := buildDailyReport(

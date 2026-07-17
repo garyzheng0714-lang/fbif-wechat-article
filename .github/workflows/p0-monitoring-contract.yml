@@ -1,0 +1,36 @@
+name: P0 WeChat Monitoring Contract
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p0-monitoring-official-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  monitoring-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # No path filter: every change must re-prove freepublish independence,
+      # per-endpoint quota accounting, layout outbox and alert delivery.
+      - name: Run complete Go test suite
+        run: go test ./...
+
+      - name: Race-test official monitoring contracts
+        run: go test -race ./analytics ./archive ./autolayout ./wechat
+
+      - name: Test independent external watchdog
+        run: python3 -m unittest tools/test_external_watchdog.py

@@ -127,6 +127,34 @@ func TestSaveFetchPreservesRawAndNormalizesArticleMetrics(t *testing.T) {
 	}
 }
 
+func TestQuotaReservationsExcludeOnlyLocalQuotaRejections(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	start := time.Date(2026, 7, 17, 0, 0, 0, 0, time.UTC)
+	records := []FetchRecord{
+		{Endpoint: "getarticleread", Category: "article", HTTPStatus: 200, Success: true, FetchedAt: start.Add(time.Minute)},
+		{Endpoint: "freepublish_batchget", Category: "publish", Error: "transport timeout", FetchedAt: start.Add(2 * time.Minute)},
+		{Endpoint: "freepublish_batchget", Category: "publish", Error: "WeChat API daily quota limit reached for freepublish_batchget (daily-limit-reached)", FetchedAt: start.Add(3 * time.Minute)},
+		{Endpoint: "getarticleshare", Category: "article", HTTPStatus: 200, Success: true, FetchedAt: start.Add(25 * time.Hour)},
+	}
+	for _, record := range records {
+		if _, err := store.SaveFetch(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	counts, err := store.QuotaReservationsByEndpoint(ctx, start, start.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(counts) != 2 || counts["getarticleread"] != 1 || counts["freepublish_batchget"] != 1 {
+		t.Fatalf("quota reservations=%v", counts)
+	}
+}
+
 func TestDeferredFetchDoesNotAdvanceCursorAndMatchingSuccessClearsIt(t *testing.T) {
 	store, err := Open(":memory:")
 	if err != nil {

@@ -58,6 +58,10 @@ func NewRuntimeFromEnv() (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := migrateLegacyQuotaFromArchive(context.Background(), store, time.Now()); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	runtime := &Runtime{
 		Store: store,
 		Analytics: &Collector{
@@ -81,6 +85,45 @@ func NewRuntimeFromEnv() (*Runtime, error) {
 	}
 	runtime.Layout = layoutDispatcher
 	return runtime, nil
+}
+
+func migrateLegacyQuotaFromArchive(ctx context.Context, store *archive.Store, now time.Time) error {
+	if !wechat.LegacyDailyQuotaMigrationNeeded() {
+		return nil
+	}
+	localNow := now.In(wechat.ShanghaiLoc())
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, wechat.ShanghaiLoc())
+	archived, err := store.QuotaReservationsByEndpoint(ctx, start, start.AddDate(0, 0, 1))
+	if err != nil {
+		return fmt.Errorf("reconstruct endpoint quota reservations: %w", err)
+	}
+	counts := make(map[string]int, len(archived))
+	for endpoint, count := range archived {
+		counts[archivedQuotaKey(endpoint)] += count
+	}
+	migrated, err := wechat.MigrateLegacyDailyQuota(counts)
+	if err != nil {
+		return fmt.Errorf("migrate legacy endpoint quota: %w", err)
+	}
+	if migrated {
+		log.Printf("[Quota] Migrated exact per-endpoint counters from %d archived calls", sumQuotaCounts(counts))
+	}
+	return nil
+}
+
+func archivedQuotaKey(endpoint string) string {
+	if _, ok := wechat.DataCubeEndpointByName(endpoint); ok {
+		return "datacube_" + endpoint
+	}
+	return endpoint
+}
+
+func sumQuotaCounts(counts map[string]int) int {
+	total := 0
+	for _, count := range counts {
+		total += count
+	}
+	return total
 }
 
 func (r *Runtime) Close() error {

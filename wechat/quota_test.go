@@ -109,6 +109,80 @@ func TestLegacyGlobalCountDoesNotResetSameDayQuota(t *testing.T) {
 	}
 }
 
+func TestLegacyGlobalCountMigratesOnlyFromExactArchivedReservations(t *testing.T) {
+	path := resetQuotaForTest(t)
+	legacy := map[string]interface{}{
+		"date":  time.Now().In(ShanghaiLoc()).Format("2006-01-02"),
+		"count": 3,
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !LegacyDailyQuotaMigrationNeeded() {
+		t.Fatal("legacy global count should require migration")
+	}
+
+	migrated, err := MigrateLegacyDailyQuota(map[string]int{"endpoint_a": 2, "endpoint_b": 1})
+	if err != nil || !migrated {
+		t.Fatalf("migrated=%t err=%v", migrated, err)
+	}
+	if got := CurrentEndpointQuotaStatus("endpoint_a").Used; got != 2 {
+		t.Fatalf("endpoint_a used=%d, want 2", got)
+	}
+	if got := CurrentEndpointQuotaStatus("endpoint_b").Used; got != 1 {
+		t.Fatalf("endpoint_b used=%d, want 1", got)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state dailyQuotaState
+	if err := json.Unmarshal(stored, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != 2 || state.Count != 0 || state.Counts["endpoint_a"] != 2 || state.Counts["endpoint_b"] != 1 {
+		t.Fatalf("migrated state=%+v", state)
+	}
+	if LegacyDailyQuotaMigrationNeeded() {
+		t.Fatal("v2 endpoint counters must not trigger another archive scan")
+	}
+}
+
+func TestLegacyGlobalCountMigrationFailsClosedOnMismatch(t *testing.T) {
+	path := resetQuotaForTest(t)
+	legacy := map[string]interface{}{
+		"date":  time.Now().In(ShanghaiLoc()).Format("2006-01-02"),
+		"count": 3,
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := MigrateLegacyDailyQuota(map[string]int{"endpoint_a": 2})
+	if err == nil || migrated {
+		t.Fatalf("migrated=%t err=%v, want fail closed", migrated, err)
+	}
+	stored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state dailyQuotaState
+	if err := json.Unmarshal(stored, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Count != 3 || state.Version != 0 {
+		t.Fatalf("legacy state changed after mismatch: %+v", state)
+	}
+}
+
 func TestDailyQuotaDoesNotCallThroughWhenReservationCannotPersist(t *testing.T) {
 	resetQuotaForTest(t)
 	brokenPath := filepath.Join(t.TempDir(), "quota-as-directory")

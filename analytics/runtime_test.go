@@ -21,6 +21,26 @@ func TestNextScheduledCollectionRunsAfterDelayedMetricsBecomeAvailable(t *testin
 	}
 }
 
+func TestSumQuotaCountsUsesIndependentEndpointReservations(t *testing.T) {
+	counts := map[string]int{
+		"freepublish_batchget":     8,
+		"datacube_getarticleread":  126,
+		"datacube_getarticleshare": 125,
+	}
+	if got := sumQuotaCounts(counts); got != 259 {
+		t.Fatalf("sum=%d, want 259", got)
+	}
+}
+
+func TestArchivedQuotaKeyMatchesClientReservationKeys(t *testing.T) {
+	if got := archivedQuotaKey("getarticleread"); got != "datacube_getarticleread" {
+		t.Fatalf("data cube key=%q", got)
+	}
+	if got := archivedQuotaKey("freepublish_batchget"); got != "freepublish_batchget" {
+		t.Fatalf("content key=%q", got)
+	}
+}
+
 func TestDailyCollectionNeverStartsBefore0805Shanghai(t *testing.T) {
 	loc := wechat.ShanghaiLoc()
 	if dailyCollectionReady(time.Date(2026, 7, 15, 8, 4, 59, 0, loc)) {

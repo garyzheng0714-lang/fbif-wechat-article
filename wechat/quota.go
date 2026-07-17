@@ -104,6 +104,54 @@ func saveQuota(q *dailyQuotaState) error {
 	return nil
 }
 
+// MigrateLegacyDailyQuota replaces an unattributed v1 global count with exact
+// per-endpoint reservations reconstructed from the durable API fetch ledger.
+// A mismatch fails closed so an ambiguous global count is never reset or
+// copied onto every endpoint.
+func MigrateLegacyDailyQuota(reconstructed map[string]int) (bool, error) {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today := time.Now().In(ShanghaiLoc()).Format("2006-01-02")
+	current := loadQuota(today)
+	if current.Count <= 0 {
+		quotaCache = current
+		return false, nil
+	}
+	counts := make(map[string]int, len(reconstructed))
+	total := 0
+	for endpoint, count := range reconstructed {
+		if strings.TrimSpace(endpoint) == "" || count < 0 {
+			return false, fmt.Errorf("invalid reconstructed quota count for %q: %d", endpoint, count)
+		}
+		if count == 0 {
+			continue
+		}
+		counts[endpoint] = count
+		total += count
+	}
+	if total != current.Count {
+		return false, fmt.Errorf("legacy WeChat quota migration mismatch: archived=%d legacy=%d", total, current.Count)
+	}
+	migrated := &dailyQuotaState{Version: 2, Date: today, Counts: counts}
+	if err := saveQuota(migrated); err != nil {
+		return false, err
+	}
+	quotaCache = migrated
+	return true, nil
+}
+
+// LegacyDailyQuotaMigrationNeeded avoids scanning the archive on normal v2
+// startups. It only reports whether today's quota file still has an
+// unattributed global count.
+func LegacyDailyQuotaMigrationNeeded() bool {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today := time.Now().In(ShanghaiLoc()).Format("2006-01-02")
+	current := loadQuota(today)
+	quotaCache = current
+	return current.Count > 0
+}
+
 func dailyQuotaLimit() int {
 	for _, name := range []string{"WECHAT_ENDPOINT_DAILY_QUOTA_LIMIT", "WECHAT_DAILY_QUOTA_LIMIT"} {
 		v := strings.TrimSpace(os.Getenv(name))

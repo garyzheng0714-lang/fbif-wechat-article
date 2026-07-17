@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
@@ -22,6 +23,7 @@ type MonitoringStatus struct {
 	CheckedAt                int64                     `json:"checkedAt"`
 	StaleEndpoints           []string                  `json:"staleEndpoints,omitempty"`
 	FailedEndpoints          []string                  `json:"failedEndpoints,omitempty"`
+	QuotaLimitedEndpoints    []string                  `json:"quotaLimitedEndpoints,omitempty"`
 	DeferredEndpoints        []string                  `json:"deferredEndpoints,omitempty"`
 	OldestDeferredAgeSeconds int64                     `json:"oldestDeferredAgeSeconds"`
 	StaleContentStreams      []string                  `json:"staleContentStreams,omitempty"`
@@ -53,7 +55,11 @@ func (r *Runtime) MonitoringStatus(ctx context.Context, now time.Time) (*Monitor
 			status.StaleEndpoints = append(status.StaleEndpoints, endpoint.Name)
 		}
 		if ok && state.LastError != "" {
-			status.FailedEndpoints = append(status.FailedEndpoints, endpoint.Name)
+			if isQuotaLimitMessage(state.LastError) {
+				status.QuotaLimitedEndpoints = append(status.QuotaLimitedEndpoints, endpoint.Name)
+			} else {
+				status.FailedEndpoints = append(status.FailedEndpoints, endpoint.Name)
+			}
 		}
 		if ok && state.DeferredPending {
 			status.DeferredEndpoints = append(status.DeferredEndpoints, endpoint.Name)
@@ -121,11 +127,16 @@ func (r *Runtime) MonitoringStatus(ctx context.Context, now time.Time) (*Monitor
 	}
 	sort.Strings(status.StaleEndpoints)
 	sort.Strings(status.FailedEndpoints)
+	sort.Strings(status.QuotaLimitedEndpoints)
 	sort.Strings(status.DeferredEndpoints)
 	sort.Strings(status.StaleContentStreams)
 	sort.Strings(status.Issues)
 	status.Ready = len(status.Issues) == 0
 	return status, nil
+}
+
+func isQuotaLimitMessage(message string) bool {
+	return strings.Contains(strings.ToLower(message), "daily quota limit reached")
 }
 
 func ageSecondsFromMillis(now time.Time, millis int64) int64 {

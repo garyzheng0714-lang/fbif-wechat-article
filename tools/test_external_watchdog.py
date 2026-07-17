@@ -23,6 +23,15 @@ from tools.external_watchdog import (
 
 
 class ExternalWatchdogTest(unittest.TestCase):
+    def test_workflow_loads_monitor_token_from_server_with_validated_key(self) -> None:
+        workflow = (
+            pathlib.Path(__file__).parents[1] / ".github" / "workflows" / "watchdog.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ssh-keygen -y -f ~/.ssh/id_watchdog", workflow)
+        self.assertIn("/opt/fbif-wechat-article-dashboard/.env", workflow)
+        self.assertIn("PUBLISH_SYNC_SERVICE_TOKEN=", workflow)
+        self.assertNotIn("APP_ENV_B64: ${{ secrets.APP_ENV_B64 }}", workflow)
+
     def test_evaluate_uses_only_ready_and_issue_codes(self) -> None:
         self.assertEqual(evaluate("feed", {"ready": True, "issues": ["ignored"]}), [])
         self.assertEqual(

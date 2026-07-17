@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 import pathlib
+import re
 import tempfile
 import time
 import urllib.error
@@ -25,6 +26,8 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
 FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
 FEISHU_MESSAGE_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
+DEFAULT_ALERT_RELAY_URL = "https://fbifmp-layout.foodtalks.cn/api/publish/monitor-alert"
+VOLATILE_NUMBER = re.compile(r"\d+")
 
 
 def fetch_json(name: str, url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
@@ -147,6 +150,26 @@ def send_feishu_app(
         raise RuntimeError(f"Feishu app report code {message_result.get('code')}")
 
 
+def send_alert_relay(relay_url: str, service_token: str, status: str, message: str, timeout: float) -> None:
+    if not relay_url.startswith("https://") or not service_token:
+        raise RuntimeError("authenticated alert relay is not configured")
+    lines = [" ".join(line.split()) for line in message.splitlines() if line.strip()]
+    result = _post_json(
+        relay_url,
+        {
+            "source": "github-watchdog",
+            "status": status,
+            "summary": (lines[0] if lines else "GitHub 外部看门狗状态更新")[:500],
+            "details": [line[:300] for line in lines[1:21]],
+        },
+        {"X-Publish-Sync-Token": service_token},
+        timeout,
+        "alert relay",
+    )
+    if result.get("delivered") is not True:
+        raise RuntimeError("alert relay did not confirm delivery")
+
+
 def load_state(path: pathlib.Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -165,7 +188,8 @@ def save_state(path: pathlib.Path, state: dict[str, Any]) -> None:
 
 
 def fingerprint(issues: list[str]) -> str:
-    encoded = json.dumps(sorted(issues), ensure_ascii=False, separators=(",", ":")).encode()
+    stable = [VOLATILE_NUMBER.sub("#", issue) for issue in sorted(issues)]
+    encoded = json.dumps(stable, ensure_ascii=False, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -224,11 +248,25 @@ def run(args: argparse.Namespace) -> int:
                     message,
                     args.timeout,
                 )
-            else:
+            elif all(
+                [
+                    os.getenv("FEISHU_APP_ID", "").strip(),
+                    os.getenv("FEISHU_APP_SECRET", "").strip(),
+                    os.getenv("OFFICIAL_FEISHU_CHAT_ID", "").strip(),
+                ]
+            ):
                 send_feishu_app(
                     os.getenv("FEISHU_APP_ID", "").strip(),
                     os.getenv("FEISHU_APP_SECRET", "").strip(),
                     os.getenv("OFFICIAL_FEISHU_CHAT_ID", "").strip(),
+                    message,
+                    args.timeout,
+                )
+            else:
+                send_alert_relay(
+                    os.getenv("OFFICIAL_ALERT_RELAY_URL", DEFAULT_ALERT_RELAY_URL).strip(),
+                    service_token,
+                    "recovery" if healthy else "critical",
                     message,
                     args.timeout,
                 )

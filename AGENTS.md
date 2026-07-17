@@ -17,3 +17,10 @@
 - 微信官方 API 返回的原始响应和全部可获取字段默认落库，不因当前未建列而丢弃。
 - 飞书多维表格同步在全量关联审计完成且用户明确确认前保持关闭。图片、图文、视频、语音素材库不作为已发布文章真相源，也不纳入已发布文章自动同步。
 - 此前“273/311 即历史已发布全量”的结论已永久撤销。详细验收合同见 `docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md`。
+
+## P0 公众号已发布监控红线（2026-07-17，最高优先级）
+
+- `freepublish` 已发布轮询独立于 draft；任何草稿、素材或历史回填失败都不得阻断 09:15–19:15 的已发布探测。群发与 freepublish 是不同覆盖路径，禁止宣称单一路径覆盖全部群发。
+- 官方服务必须配置直接飞书 reporter 或使用 `PUBLISH_SYNC_SERVICE_TOKEN` 的 HTTPS 告警中继；`reportingConfigured=false` 必须令监控 fail closed。外部 GitHub 看门狗每五分钟检查 layout/feed/official，飞书不可达时必须维护持久 P0 Incident Issue。
+- `.github/workflows/p0-monitoring-contract.yml` 不得增加 paths 过滤；每个 PR 和 main 推送必须运行完整 Go 测试、P0 race tests 和外部看门狗测试，失败不得部署。
+- 禁止通过删测、skip、扩大健康阈值、把当前错误改成历史指标或关闭 reporter 来“修绿”。图集/小绿书继续 fail closed，不得放宽普通文章类型证据。

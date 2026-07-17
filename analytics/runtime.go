@@ -214,7 +214,7 @@ func (r *Runtime) Status(ctx context.Context) (*RuntimeStatus, error) {
 	}
 	status.ReportingConfigured = r.Reporter != nil && r.Reporter.Configured()
 	if !status.ReportingConfigured {
-		status.Warnings = append(status.Warnings, "官方数据日报/告警未配置 OFFICIAL_FEISHU_WEBHOOK_URL")
+		status.Warnings = append(status.Warnings, "官方数据日报/告警未配置可用的飞书或告警中继 reporter")
 	}
 	if status.HistoricalCoverage != nil && !status.HistoricalCoverage.Verified {
 		status.Warnings = append(status.Warnings, "历史文章覆盖尚未核验；Base 写回保持关闭")

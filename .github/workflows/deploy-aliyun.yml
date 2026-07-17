@@ -205,6 +205,9 @@ jobs:
             if [ -n "${PUBLISH_SYNC_SERVICE_TOKEN_B64:-}" ]; then
               upsert_env_from_b64 PUBLISH_SYNC_SERVICE_TOKEN "${PUBLISH_SYNC_SERVICE_TOKEN_B64}"
             fi
+            if [ -n "${OFFICIAL_ALERT_RELAY_URL_B64:-}" ]; then
+              upsert_env_from_b64 OFFICIAL_ALERT_RELAY_URL "${OFFICIAL_ALERT_RELAY_URL_B64}"
+            fi
             if [ "${OFFICIAL_FEISHU_OVERRIDE:-0}" = "1" ]; then
               upsert_env_from_b64 OFFICIAL_FEISHU_WEBHOOK_URL "${OFFICIAL_FEISHU_WEBHOOK_URL_B64:-}"
               upsert_env_from_b64 OFFICIAL_FEISHU_WEBHOOK_SECRET "${OFFICIAL_FEISHU_WEBHOOK_SECRET_B64:-}"
@@ -227,10 +230,11 @@ jobs:
               echo "Deployment env missing WeChat secret"
               exit 1
             fi
-            if ! require_key OFFICIAL_FEISHU_WEBHOOK_URL; then
-              require_key FEISHU_APP_ID || { echo "Deployment env missing FEISHU_APP_ID or OFFICIAL_FEISHU_WEBHOOK_URL"; exit 1; }
-              require_key FEISHU_APP_SECRET || { echo "Deployment env missing FEISHU_APP_SECRET or OFFICIAL_FEISHU_WEBHOOK_URL"; exit 1; }
-              require_key OFFICIAL_FEISHU_CHAT_ID || { echo "Deployment env missing OFFICIAL_FEISHU_CHAT_ID or OFFICIAL_FEISHU_WEBHOOK_URL"; exit 1; }
+            if ! require_key OFFICIAL_FEISHU_WEBHOOK_URL &&
+              ! { require_key FEISHU_APP_ID && require_key FEISHU_APP_SECRET && require_key OFFICIAL_FEISHU_CHAT_ID; } &&
+              ! { require_key OFFICIAL_ALERT_RELAY_URL && require_key PUBLISH_SYNC_SERVICE_TOKEN; }; then
+              echo "Deployment env missing an official alert reporter (webhook, Feishu app, or authenticated relay)"
+              exit 1
             fi
             if grep -Eq '^[[:space:]]*(export[[:space:]]+)?ENABLE_AUTO_LAYOUT=(1|true|TRUE)[[:space:]]*$' "${SOURCE_ENV}"; then
               require_key LAYOUT_OFFICIAL_SYNC_URL || { echo "Deployment env missing LAYOUT_OFFICIAL_SYNC_URL"; exit 1; }
@@ -319,6 +323,7 @@ jobs:
           PUBLISH_SYNC_SERVICE_TOKEN_B64=""
           OFFICIAL_FEISHU_WEBHOOK_URL_B64=""
           OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=""
+          OFFICIAL_ALERT_RELAY_URL_B64="$(printf '%s' 'https://fbifmp-layout.foodtalks.cn/api/publish/monitor-alert' | base64 -w 0)"
           if [ -n "${REPORTER_WEBHOOK_URL:-}" ]; then
             OFFICIAL_FEISHU_OVERRIDE=1
             OFFICIAL_FEISHU_WEBHOOK_URL_B64="$(printf '%s' "${REPORTER_WEBHOOK_URL}" | base64 -w 0)"
@@ -329,8 +334,8 @@ jobs:
           fi
 
           REMOTE_ENV="$(printf \
-            "APP_DIR=%q APP_ENV_B64=%q PUBLISH_SYNC_SERVICE_TOKEN_B64=%q OFFICIAL_FEISHU_OVERRIDE=%q OFFICIAL_FEISHU_WEBHOOK_URL_B64=%q OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=%q" \
-            "${APP_DIR:-}" "${APP_ENV_B64:-}" "${PUBLISH_SYNC_SERVICE_TOKEN_B64}" "${OFFICIAL_FEISHU_OVERRIDE}" \
+            "APP_DIR=%q APP_ENV_B64=%q PUBLISH_SYNC_SERVICE_TOKEN_B64=%q OFFICIAL_ALERT_RELAY_URL_B64=%q OFFICIAL_FEISHU_OVERRIDE=%q OFFICIAL_FEISHU_WEBHOOK_URL_B64=%q OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=%q" \
+            "${APP_DIR:-}" "${APP_ENV_B64:-}" "${PUBLISH_SYNC_SERVICE_TOKEN_B64}" "${OFFICIAL_ALERT_RELAY_URL_B64}" "${OFFICIAL_FEISHU_OVERRIDE}" \
             "${OFFICIAL_FEISHU_WEBHOOK_URL_B64}" "${OFFICIAL_FEISHU_WEBHOOK_SECRET_B64}")"
 
           ssh \

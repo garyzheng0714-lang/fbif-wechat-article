@@ -106,7 +106,7 @@ jobs:
         if: always()
         id: probe
         continue-on-error: true
-        run: python3 tools/external_watchdog.py
+        run: python3 tools/external_watchdog.py --issue-only
 
       - name: Save alert state
         if: always() && hashFiles('.watchdog-state.json') != ''

@@ -204,6 +204,36 @@ class ExternalWatchdogTest(unittest.TestCase):
             thread.join(timeout=2)
             server.server_close()
 
+    def test_issue_only_mode_does_not_duplicate_feishu_alert(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ,
+            {"PUBLISH_SYNC_SERVICE_TOKEN": "service-token"},
+            clear=True,
+        ), mock.patch(
+            "tools.external_watchdog.fetch_json",
+            side_effect=[
+                {"ready": True},
+                {"ready": False, "issues": ["poller_stale"]},
+                {"ready": True},
+            ],
+        ), mock.patch("tools.external_watchdog.send_alert_relay") as relay:
+            state_path = pathlib.Path(directory) / "state.json"
+            result = run(
+                argparse.Namespace(
+                    layout_url="https://layout.example/monitoring",
+                    feed_url="https://feed.example/monitoring",
+                    official_url="http://127.0.0.1:13002/monitoring",
+                    state=str(state_path),
+                    timeout=2.0,
+                    issue_only=True,
+                )
+            )
+            state = load_state(state_path)
+        self.assertEqual(result, 1)
+        relay.assert_not_called()
+        self.assertEqual(state["notification_channel"], "github-issue")
+        self.assertTrue(state["notified"])
+
 
 if __name__ == "__main__":
     unittest.main()

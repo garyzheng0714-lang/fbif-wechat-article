@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -30,15 +31,28 @@ type Collector struct {
 }
 
 type RunResult struct {
-	StartedAt      int64             `json:"startedAt"`
-	FinishedAt     int64             `json:"finishedAt"`
-	Calls          int               `json:"calls"`
-	Succeeded      int               `json:"succeeded"`
-	Failed         int               `json:"failed"`
-	RecentComplete bool              `json:"recentComplete"`
-	QuotaExhausted bool              `json:"quotaExhausted"`
-	RetiredProbed  int               `json:"retiredProbed"`
-	Errors         map[string]string `json:"errors,omitempty"`
+	StartedAt               int64             `json:"startedAt"`
+	FinishedAt              int64             `json:"finishedAt"`
+	Calls                   int               `json:"calls"`
+	Succeeded               int               `json:"succeeded"`
+	Failed                  int               `json:"failed"`
+	Deferred                int               `json:"deferred"`
+	RecentComplete          bool              `json:"recentComplete"`
+	QuotaExhausted          bool              `json:"quotaExhausted"`
+	QuotaExhaustedEndpoints []string          `json:"quotaExhaustedEndpoints,omitempty"`
+	DeferredEndpoints       map[string]string `json:"deferredEndpoints,omitempty"`
+	RetiredProbed           int               `json:"retiredProbed"`
+	Errors                  map[string]string `json:"errors,omitempty"`
+}
+
+type DeferredResponseError struct {
+	Endpoint  string
+	BeginDate string
+	EndDate   string
+}
+
+func (e *DeferredResponseError) Error() string {
+	return fmt.Sprintf("%s %s..%s: WeChat data is delayed (is_delay=true)", e.Endpoint, e.BeginDate, e.EndDate)
 }
 
 func (c *Collector) CollectRange(ctx context.Context, endpointName, beginDate, endDate string) (int, error) {
@@ -75,8 +89,9 @@ func (c *Collector) Run(ctx context.Context) (*RunResult, error) {
 
 	now := c.now()
 	result := &RunResult{
-		StartedAt: now.UnixMilli(),
-		Errors:    make(map[string]string),
+		StartedAt:         now.UnixMilli(),
+		Errors:            make(map[string]string),
+		DeferredEndpoints: make(map[string]string),
 	}
 	maxCalls := c.MaxCalls
 	if maxCalls <= 0 {
@@ -100,14 +115,7 @@ func (c *Collector) Run(ctx context.Context) (*RunResult, error) {
 		err := c.collectWindow(ctx, endpoint, date, date, "")
 		result.Calls++
 		if err != nil {
-			result.Failed++
-			failedEndpoint[endpoint.Name] = true
-			result.Errors[endpoint.Name] = err.Error()
-			runErrors = append(runErrors, err)
-			if isQuotaError(err) {
-				result.QuotaExhausted = true
-				break
-			}
+			recordEndpointIssue(result, failedEndpoint, endpoint.Name, err, &runErrors)
 			continue
 		}
 		result.Succeeded++
@@ -117,74 +125,58 @@ func (c *Collector) Run(ctx context.Context) (*RunResult, error) {
 	// The six legacy endpoints currently return official error 47009 (offline).
 	// Probe each once and archive that response, but never waste daily quota by
 	// retrying a globally retired interface.
-	if !result.QuotaExhausted {
-		for _, endpoint := range c.retiredEndpoints() {
-			if result.Calls >= maxCalls {
-				break
-			}
-			terminal, err := c.Store.HasTerminalFetch(ctx, endpoint.Name)
-			if err != nil {
-				runErrors = append(runErrors, err)
-				continue
-			}
-			if terminal {
-				continue
-			}
-			date := yesterday.Format("2006-01-02")
-			expectedRetired, err := c.probeRetired(ctx, endpoint, date)
-			result.Calls++
-			if expectedRetired {
-				result.RetiredProbed++
-				continue
-			}
-			if err != nil {
-				result.Failed++
-				result.Errors[endpoint.Name] = err.Error()
-				runErrors = append(runErrors, err)
-				if isQuotaError(err) {
-					result.QuotaExhausted = true
-					break
-				}
-			}
+	for _, endpoint := range c.retiredEndpoints() {
+		if result.Calls >= maxCalls {
+			break
+		}
+		terminal, err := c.Store.HasTerminalFetch(ctx, endpoint.Name)
+		if err != nil {
+			runErrors = append(runErrors, err)
+			continue
+		}
+		if terminal {
+			continue
+		}
+		date := yesterday.Format("2006-01-02")
+		expectedRetired, err := c.probeRetired(ctx, endpoint, date)
+		result.Calls++
+		if expectedRetired {
+			result.RetiredProbed++
+			continue
+		}
+		if err != nil {
+			recordEndpointIssue(result, nil, endpoint.Name, err, &runErrors)
 		}
 	}
 
 	// Pass 2: total-series endpoints keep changing for 7/30 days after publish.
 	// Refresh those publish dates newest-first before starting historical work.
-	if !result.QuotaExhausted {
-		for _, endpoint := range endpoints {
-			if endpoint.RefreshDays <= 1 || failedEndpoint[endpoint.Name] {
-				continue
-			}
-			for daysAgo := 1; daysAgo < endpoint.RefreshDays && result.Calls < maxCalls; daysAgo++ {
-				dateTime := yesterday.AddDate(0, 0, -daysAgo)
-				if dateBefore(dateTime, endpoint.EarliestDate) {
-					break
-				}
-				date := dateTime.Format("2006-01-02")
-				err := c.collectWindow(ctx, endpoint, date, date, "")
-				result.Calls++
-				if err != nil {
-					result.Failed++
-					failedEndpoint[endpoint.Name] = true
-					result.Errors[endpoint.Name] = err.Error()
-					runErrors = append(runErrors, err)
-					if isQuotaError(err) {
-						result.QuotaExhausted = true
-					}
-					break
-				}
-				result.Succeeded++
-			}
-			if result.QuotaExhausted || result.Calls >= maxCalls {
+	for _, endpoint := range endpoints {
+		if endpoint.RefreshDays <= 1 || failedEndpoint[endpoint.Name] {
+			continue
+		}
+		for daysAgo := 1; daysAgo < endpoint.RefreshDays && result.Calls < maxCalls; daysAgo++ {
+			dateTime := yesterday.AddDate(0, 0, -daysAgo)
+			if dateBefore(dateTime, endpoint.EarliestDate) {
 				break
 			}
+			date := dateTime.Format("2006-01-02")
+			err := c.collectWindow(ctx, endpoint, date, date, "")
+			result.Calls++
+			if err != nil {
+				recordEndpointIssue(result, failedEndpoint, endpoint.Name, err, &runErrors)
+				break
+			}
+			result.Succeeded++
+		}
+		if result.Calls >= maxCalls {
+			break
 		}
 	}
 
 	// Pass 3: round-robin historical backfill. Each endpoint advances only
 	// after a successful, durably stored response.
-	for !result.QuotaExhausted && result.Calls < maxCalls {
+	for result.Calls < maxCalls {
 		progressed := false
 		for _, endpoint := range endpoints {
 			if result.Calls >= maxCalls || failedEndpoint[endpoint.Name] {
@@ -210,14 +202,7 @@ func (c *Collector) Run(ctx context.Context) (*RunResult, error) {
 			err = c.collectWindow(ctx, endpoint, window.Begin, window.End, nextDate)
 			result.Calls++
 			if err != nil {
-				result.Failed++
-				failedEndpoint[endpoint.Name] = true
-				result.Errors[endpoint.Name] = err.Error()
-				runErrors = append(runErrors, err)
-				if isQuotaError(err) {
-					result.QuotaExhausted = true
-					break
-				}
+				recordEndpointIssue(result, failedEndpoint, endpoint.Name, err, &runErrors)
 				continue
 			}
 			result.Succeeded++
@@ -231,6 +216,67 @@ func (c *Collector) Run(ctx context.Context) (*RunResult, error) {
 	if len(result.Errors) == 0 {
 		result.Errors = nil
 	}
+	if len(result.DeferredEndpoints) == 0 {
+		result.DeferredEndpoints = nil
+	}
+	sort.Strings(result.QuotaExhaustedEndpoints)
+	return result, errors.Join(runErrors...)
+}
+
+// RetryDeferred retries only the exact windows whose latest official response
+// carried is_delay=true. It never advances a historical cursor on its own.
+func (c *Collector) RetryDeferred(ctx context.Context) (*RunResult, error) {
+	if c.Client == nil || c.Store == nil {
+		return nil, fmt.Errorf("analytics collector is not configured")
+	}
+	if !c.runMu.TryLock() {
+		return nil, fmt.Errorf("analytics collector is already running")
+	}
+	defer c.runMu.Unlock()
+
+	now := c.now()
+	result := &RunResult{
+		StartedAt:         now.UnixMilli(),
+		Errors:            make(map[string]string),
+		DeferredEndpoints: make(map[string]string),
+	}
+	states, err := c.Store.ListStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	active := make(map[string]wechat.DataCubeEndpoint)
+	for _, endpoint := range c.activeEndpoints() {
+		active[endpoint.Name] = endpoint
+	}
+	maxCalls := c.MaxCalls
+	if maxCalls <= 0 {
+		maxCalls = 500
+	}
+	var runErrors []error
+	for _, state := range states {
+		if result.Calls >= maxCalls || !state.DeferredPending {
+			continue
+		}
+		endpoint, ok := active[state.Endpoint]
+		if !ok || state.LastDeferredBegin == "" || state.LastDeferredEnd == "" {
+			continue
+		}
+		err := c.collectWindow(ctx, endpoint, state.LastDeferredBegin, state.LastDeferredEnd, "")
+		result.Calls++
+		if err != nil {
+			recordEndpointIssue(result, nil, endpoint.Name, err, &runErrors)
+			continue
+		}
+		result.Succeeded++
+	}
+	result.FinishedAt = c.now().UnixMilli()
+	if len(result.Errors) == 0 {
+		result.Errors = nil
+	}
+	if len(result.DeferredEndpoints) == 0 {
+		result.DeferredEndpoints = nil
+	}
+	sort.Strings(result.QuotaExhaustedEndpoints)
 	return result, errors.Join(runErrors...)
 }
 
@@ -267,13 +313,15 @@ func (c *Collector) probeRetired(ctx context.Context, endpoint wechat.DataCubeEn
 func (c *Collector) collectWindow(ctx context.Context, endpoint wechat.DataCubeEndpoint, beginDate, endDate, nextBackfillDate string) error {
 	fetchedAt := c.now()
 	response, callErr := c.Client.Call(ctx, endpoint, beginDate, endDate)
+	deferred := callErr == nil && responseIsDelayed(response)
 	record := archive.FetchRecord{
 		Endpoint:  endpoint.Name,
 		Category:  endpoint.Category,
 		BeginDate: beginDate,
 		EndDate:   endDate,
 		FetchedAt: fetchedAt,
-		Success:   callErr == nil,
+		Success:   callErr == nil && !deferred,
+		Deferred:  deferred,
 	}
 	if response != nil {
 		record.RequestJSON = response.RequestBody
@@ -289,6 +337,9 @@ func (c *Collector) collectWindow(ctx context.Context, endpoint wechat.DataCubeE
 		return fmt.Errorf("persist %s %s..%s: %w", endpoint.Name, beginDate, endDate, err)
 	}
 
+	if deferred {
+		return &DeferredResponseError{Endpoint: endpoint.Name, BeginDate: beginDate, EndDate: endDate}
+	}
 	if callErr != nil {
 		if err := c.Store.MarkFailure(ctx, endpoint.Name, endpoint.Category, callErr.Error(), fetchedAt); err != nil {
 			return fmt.Errorf("persist %s failure status: %w", endpoint.Name, err)
@@ -354,6 +405,7 @@ type Status struct {
 	RetiredEndpoints    []string                `json:"retiredEndpoints"`
 	MissingEndpoints    []string                `json:"missingEndpoints,omitempty"`
 	FailedEndpoints     map[string]string       `json:"failedEndpoints,omitempty"`
+	DeferredEndpoints   map[string]string       `json:"deferredEndpoints,omitempty"`
 	States              []archive.EndpointState `json:"states"`
 	Storage             archive.StoreStats      `json:"storage"`
 }
@@ -375,6 +427,7 @@ func (c *Collector) Status(ctx context.Context) (*Status, error) {
 		DocumentedEndpoints: len(c.configuredEndpoints()),
 		ExpectedEndpoints:   len(c.activeEndpoints()),
 		FailedEndpoints:     make(map[string]string),
+		DeferredEndpoints:   make(map[string]string),
 		States:              states,
 		Storage:             stats,
 	}
@@ -391,6 +444,9 @@ func (c *Collector) Status(ctx context.Context) (*Status, error) {
 			status.FailedEndpoints[endpoint.Name] = state.LastError
 			continue
 		}
+		if state.DeferredPending {
+			status.DeferredEndpoints[endpoint.Name] = state.LastDeferredBegin + ".." + state.LastDeferredEnd
+		}
 		if state.LastSuccessAt == 0 {
 			status.MissingEndpoints = append(status.MissingEndpoints, endpoint.Name)
 			continue
@@ -402,6 +458,9 @@ func (c *Collector) Status(ctx context.Context) (*Status, error) {
 	status.Ready = status.HealthyEndpoints == status.ExpectedEndpoints
 	if len(status.FailedEndpoints) == 0 {
 		status.FailedEndpoints = nil
+	}
+	if len(status.DeferredEndpoints) == 0 {
+		status.DeferredEndpoints = nil
 	}
 	return status, nil
 }
@@ -460,6 +519,53 @@ func recentPassComplete(endpoints []wechat.DataCubeEndpoint, result *RunResult, 
 	return result.Calls >= eligible && len(failed) == 0
 }
 
+func recordEndpointIssue(result *RunResult, failed map[string]bool, endpoint string, err error, runErrors *[]error) {
+	if failed != nil {
+		failed[endpoint] = true
+	}
+	var deferredError *DeferredResponseError
+	if errors.As(err, &deferredError) {
+		result.Deferred++
+		result.DeferredEndpoints[endpoint] = deferredError.Error()
+		return
+	}
+	result.Failed++
+	result.Errors[endpoint] = err.Error()
+	*runErrors = append(*runErrors, err)
+	if isQuotaError(err) {
+		result.QuotaExhausted = true
+		for _, existing := range result.QuotaExhaustedEndpoints {
+			if existing == endpoint {
+				return
+			}
+		}
+		result.QuotaExhaustedEndpoints = append(result.QuotaExhaustedEndpoints, endpoint)
+	}
+}
+
+func responseIsDelayed(response *wechat.RawAPIResponse) bool {
+	if response == nil || len(response.Body) == 0 {
+		return false
+	}
+	var payload struct {
+		IsDelay json.RawMessage `json:"is_delay"`
+	}
+	if json.Unmarshal(response.Body, &payload) != nil || len(payload.IsDelay) == 0 {
+		return false
+	}
+	var boolean bool
+	if json.Unmarshal(payload.IsDelay, &boolean) == nil {
+		return boolean
+	}
+	var value string
+	if json.Unmarshal(payload.IsDelay, &value) == nil {
+		value = strings.TrimSpace(strings.ToLower(value))
+		return value == "true" || value == "1"
+	}
+	var number float64
+	return json.Unmarshal(payload.IsDelay, &number) == nil && number != 0
+}
+
 func isQuotaError(err error) bool {
 	var quotaError *wechat.QuotaLimitError
 	if errors.As(err, &quotaError) {
@@ -473,8 +579,8 @@ func LogRunResult(prefix string, result *RunResult, err error) {
 		log.Printf("[%s] Failed before run: %v", prefix, err)
 		return
 	}
-	log.Printf("[%s] calls=%d succeeded=%d failed=%d recent_complete=%v quota_exhausted=%v",
-		prefix, result.Calls, result.Succeeded, result.Failed, result.RecentComplete, result.QuotaExhausted)
+	log.Printf("[%s] calls=%d succeeded=%d failed=%d deferred=%d recent_complete=%v quota_exhausted=%v quota_endpoints=%v",
+		prefix, result.Calls, result.Succeeded, result.Failed, result.Deferred, result.RecentComplete, result.QuotaExhausted, result.QuotaExhaustedEndpoints)
 	if err != nil {
 		log.Printf("[%s] Completed with errors: %v", prefix, err)
 	}

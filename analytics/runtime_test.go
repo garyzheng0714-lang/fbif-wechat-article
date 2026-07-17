@@ -7,44 +7,27 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
-func TestQuotaAwareCallBudgetReservesEveryRemainingLayoutPoll(t *testing.T) {
-	now := time.Date(2026, 7, 15, 12, 0, 0, 0, wechat.ShanghaiLoc())
-	budget, reserve := quotaAwareCallBudget(2000, 815, now, 15*time.Minute, true, 0)
-	if reserve != 26 || budget != 789 {
-		t.Fatalf("budget=%d reserve=%d, want 789/26", budget, reserve)
-	}
-}
-
-func TestQuotaAwareCallBudgetHonorsConfiguredCapAndContentMinimum(t *testing.T) {
-	now := time.Date(2026, 7, 15, 12, 0, 0, 0, wechat.ShanghaiLoc())
-	budget, reserve := quotaAwareCallBudget(500, 815, now, 15*time.Minute, true, 0)
-	if budget != 500 || reserve != 26 {
-		t.Fatalf("configured cap not honored: budget=%d reserve=%d", budget, reserve)
-	}
-	budget, reserve = quotaAwareCallBudget(400, 1, now, 15*time.Minute, true, 2)
-	if budget != 1 || reserve != 26 {
-		t.Fatalf("content must use the one still-available call without crossing the hard cap: budget=%d reserve=%d", budget, reserve)
-	}
-}
-
-func TestQuotaAwareCallBudgetWithoutLayoutUsesAllUsableQuota(t *testing.T) {
-	budget, reserve := quotaAwareCallBudget(2000, 815, time.Now(), 15*time.Minute, false, 0)
-	if budget != 815 || reserve != 0 {
-		t.Fatalf("budget=%d reserve=%d, want 815/0", budget, reserve)
-	}
-}
-
-func TestNextScheduledCollectionStartsShortlyAfterQuotaRefresh(t *testing.T) {
-	before := time.Date(2026, 7, 15, 0, 4, 59, 0, wechat.ShanghaiLoc())
-	wantToday := time.Date(2026, 7, 15, 0, 5, 0, 0, wechat.ShanghaiLoc())
+func TestNextScheduledCollectionRunsAfterDelayedMetricsBecomeAvailable(t *testing.T) {
+	before := time.Date(2026, 7, 15, 8, 4, 59, 0, wechat.ShanghaiLoc())
+	wantToday := time.Date(2026, 7, 15, 8, 5, 0, 0, wechat.ShanghaiLoc())
 	if got := nextScheduledCollection(before); !got.Equal(wantToday) {
-		t.Fatalf("before 00:05 got %s, want %s", got, wantToday)
+		t.Fatalf("before 08:05 got %s, want %s", got, wantToday)
 	}
 
-	after := time.Date(2026, 7, 15, 0, 5, 0, 0, wechat.ShanghaiLoc())
-	wantTomorrow := time.Date(2026, 7, 16, 0, 5, 0, 0, wechat.ShanghaiLoc())
+	after := time.Date(2026, 7, 15, 8, 5, 0, 0, wechat.ShanghaiLoc())
+	wantTomorrow := time.Date(2026, 7, 16, 8, 5, 0, 0, wechat.ShanghaiLoc())
 	if got := nextScheduledCollection(after); !got.Equal(wantTomorrow) {
-		t.Fatalf("at 00:05 got %s, want %s", got, wantTomorrow)
+		t.Fatalf("at 08:05 got %s, want %s", got, wantTomorrow)
+	}
+}
+
+func TestDailyCollectionNeverStartsBefore0805Shanghai(t *testing.T) {
+	loc := wechat.ShanghaiLoc()
+	if dailyCollectionReady(time.Date(2026, 7, 15, 8, 4, 59, 0, loc)) {
+		t.Fatal("D-1 collection must not start before 08:05")
+	}
+	if !dailyCollectionReady(time.Date(2026, 7, 15, 8, 5, 0, 0, loc)) {
+		t.Fatal("D-1 collection should be allowed at 08:05")
 	}
 }
 
@@ -83,25 +66,6 @@ func TestNextLayoutPollStaysInsideMonitoringWindow(t *testing.T) {
 	for _, tc := range cases {
 		if got := nextLayoutPoll(tc.now, interval); !got.Equal(tc.want) {
 			t.Fatalf("now=%s got=%s want=%s", tc.now, got, tc.want)
-		}
-	}
-}
-
-func TestRemainingLayoutPollsOnlyReserveCurrentWorkday(t *testing.T) {
-	loc := wechat.ShanghaiLoc()
-	interval := 15 * time.Minute
-	cases := []struct {
-		now  time.Time
-		want int
-	}{
-		{time.Date(2026, 7, 15, 0, 5, 0, 0, loc), 41},
-		{time.Date(2026, 7, 15, 12, 0, 0, 0, loc), 26},
-		{time.Date(2026, 7, 15, 18, 30, 0, 0, loc), 0},
-		{time.Date(2026, 7, 15, 20, 0, 0, 0, loc), 0},
-	}
-	for _, tc := range cases {
-		if got := remainingLayoutPollsToday(tc.now, interval); got != tc.want {
-			t.Fatalf("now=%s polls=%d want=%d", tc.now, got, tc.want)
 		}
 	}
 }

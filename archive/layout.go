@@ -41,6 +41,8 @@ type LayoutOutboxStats struct {
 	Delivered        int64  `json:"delivered"`
 	SkippedNewspic   int64  `json:"skippedNewspic"`
 	HeldUnclassified int64  `json:"heldUnclassified"`
+	OldestPendingAt  int64  `json:"oldestPendingAt"`
+	OldestFailedAt   int64  `json:"oldestFailedAt"`
 	LastError        string `json:"lastError,omitempty"`
 }
 
@@ -279,6 +281,14 @@ func (s *Store) LayoutStats(ctx context.Context) (LayoutOutboxStats, error) {
 		LayoutStatusFailed,
 		LayoutStatusDelivered,
 	).Scan(&stats.Baseline, &stats.Pending, &stats.Failed, &stats.Delivered); err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(MIN(CASE WHEN status = ? THEN created_at END), 0),
+			COALESCE(MIN(CASE WHEN status = ? THEN updated_at END), 0)
+		FROM official_layout_outbox`, LayoutStatusPending, LayoutStatusFailed).
+		Scan(&stats.OldestPendingAt, &stats.OldestFailedAt); err != nil {
 		return stats, err
 	}
 	_ = s.db.QueryRowContext(ctx, `

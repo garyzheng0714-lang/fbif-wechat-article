@@ -1,0 +1,119 @@
+name: External Sync Watchdog
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fbif-external-sync-watchdog
+  cancel-in-progress: true
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore alert state
+        uses: actions/cache/restore@v4
+        with:
+          path: .watchdog-state.json
+          key: sync-watchdog-state-${{ github.run_id }}
+          restore-keys: |
+            sync-watchdog-state-
+
+      - name: Test watchdog
+        run: python3 -m unittest tools/test_external_watchdog.py
+
+      - name: Load monitoring credentials
+        id: credentials
+        continue-on-error: true
+        env:
+          APP_ENV_B64: ${{ secrets.APP_ENV_B64 }}
+          SYNC_SERVICE_TOKEN: ${{ secrets.PUBLISH_SYNC_SERVICE_TOKEN }}
+          REPORTER_WEBHOOK_URL: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_URL }}
+          REPORTER_WEBHOOK_SECRET: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -n "${APP_ENV_B64:-}" ]; then
+            printf '%s' "$APP_ENV_B64" | tr -d '\r\n ' | base64 -d > /tmp/official-watchdog.env
+            set -a
+            . /tmp/official-watchdog.env
+            set +a
+          fi
+          if [ -n "${SYNC_SERVICE_TOKEN:-}" ]; then
+            PUBLISH_SYNC_SERVICE_TOKEN="${SYNC_SERVICE_TOKEN}"
+          fi
+          if [ -n "${REPORTER_WEBHOOK_URL:-}" ]; then
+            OFFICIAL_FEISHU_WEBHOOK_URL="${REPORTER_WEBHOOK_URL}"
+            OFFICIAL_FEISHU_WEBHOOK_SECRET="${REPORTER_WEBHOOK_SECRET:-}"
+          fi
+          for name in PUBLISH_SYNC_SERVICE_TOKEN OFFICIAL_FEISHU_WEBHOOK_URL OFFICIAL_FEISHU_WEBHOOK_SECRET FEISHU_APP_ID FEISHU_APP_SECRET OFFICIAL_FEISHU_CHAT_ID; do
+            value="${!name:-}"
+            if [ -n "$value" ]; then
+              echo "::add-mask::$value"
+              printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+            fi
+          done
+          test -n "${PUBLISH_SYNC_SERVICE_TOKEN:-}"
+          if [ -z "${OFFICIAL_FEISHU_WEBHOOK_URL:-}" ]; then
+            test -n "${FEISHU_APP_ID:-}"
+            test -n "${FEISHU_APP_SECRET:-}"
+            test -n "${OFFICIAL_FEISHU_CHAT_ID:-}"
+          fi
+
+      - name: Open tunnel to official collector
+        if: always()
+        continue-on-error: true
+        env:
+          ALIYUN_HOST: ${{ secrets.ALIYUN_HOST }}
+          ALIYUN_USER: ${{ secrets.ALIYUN_USER }}
+          ALIYUN_SSH_KEY: ${{ secrets.ALIYUN_SSH_KEY }}
+          ALIYUN_SSH_KEY_B64: ${{ secrets.ALIYUN_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          HOST="${ALIYUN_HOST:-112.124.103.65}"
+          USER="${ALIYUN_USER:-root}"
+          mkdir -p ~/.ssh
+          if [ -n "${ALIYUN_SSH_KEY:-}" ]; then
+            printf '%b' "$ALIYUN_SSH_KEY" | tr -d '\r' > ~/.ssh/id_watchdog
+          else
+            test -n "${ALIYUN_SSH_KEY_B64:-}"
+            printf '%s' "$ALIYUN_SSH_KEY_B64" | tr -d '\r\n ' | base64 -d > ~/.ssh/id_watchdog
+          fi
+          chmod 600 ~/.ssh/id_watchdog
+          ssh -f -N \
+            -i ~/.ssh/id_watchdog \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o ExitOnForwardFailure=yes \
+            -o StrictHostKeyChecking=accept-new \
+            -L 13002:127.0.0.1:3002 \
+            "${USER}@${HOST}"
+
+      - name: Probe all three services
+        if: always()
+        id: probe
+        continue-on-error: true
+        run: python3 tools/external_watchdog.py
+
+      - name: Save alert state
+        if: always() && hashFiles('.watchdog-state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .watchdog-state.json
+          key: sync-watchdog-state-${{ github.run_id }}
+
+      - name: Enforce watchdog result
+        if: always() && (steps.credentials.outcome != 'success' || steps.probe.outcome != 'success')
+        run: exit 1
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f ~/.ssh/id_watchdog /tmp/official-watchdog.env

@@ -1,13 +1,21 @@
-# fbif-wechat-article
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="fbif-wechat-article：只走公众号官方 API 归档已发布文章与阅读、分享、在看等指标，原始响应先按字节落 SQLite">
+</p>
 
-![类型：微信工具](https://img.shields.io/badge/%E7%B1%BB%E5%9E%8B-%E5%BE%AE%E4%BF%A1%E5%B7%A5%E5%85%B7-2f6fdd)
-![语言：Go](https://img.shields.io/badge/%E8%AF%AD%E8%A8%80-Go-00ADD8)
-![状态：维护中](https://img.shields.io/badge/%E7%8A%B6%E6%80%81-%E7%BB%B4%E6%8A%A4%E4%B8%AD-2ea44f)
-![README：中文](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-d73a49)
+<p align="center">
+  <img src="https://img.shields.io/badge/%E7%B1%BB%E5%9E%8B-%E5%BE%AE%E4%BF%A1%E5%BD%92%E6%A1%A3%E4%B8%8E%E9%87%87%E9%9B%86-2f6fdd?style=flat-square" alt="微信归档与采集">
+  <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.26">
+  <img src="https://img.shields.io/badge/SQLite-%E6%97%A0%20CGO-003B57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite 无 CGO">
+  <img src="https://img.shields.io/badge/%E6%8E%A5%E5%8F%A3-15%20%E4%B8%AA%E7%8E%B0%E5%BD%B9-16a34a?style=flat-square" alt="15 个现役接口">
+</p>
 
-`fbif-wechat-article` 是一个只使用微信公众号官方 API 的归档与数据采集服务。默认自动归档已发布文章、文章指标和粉丝指标，并可把普通图文送入排版待审流程，或在本地数据完整后批量同步到飞书多维表格。
+# fbif-wechat-article · 公众号文章归档
 
-> **数据口径红线：** `freepublish/batchget.total_count` 是发布对象数，不是公众号历史已发布文章总量。任何“历史全量”结论都必须经过多个官方 API、多表关联、去重及覆盖审计；审计完成并经确认前，飞书 Base 同步保持关闭。详见 [已发布文章真值合同](docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md)。
+**只使用微信公众号官方 API** 的归档与数据采集服务。默认自动归档已发布文章、文章指标和粉丝指标，并可把普通图文送入排版待审流程，或在本地数据完整后批量同步到飞书多维表格。
+
+所有响应先按原始字节写入 SQLite，再生成可查询的指标行——**微信新增字段不需要改表结构就能留存**。
+
+> **数据口径红线：** `freepublish/batchget.total_count` 是发布对象数，**不是**公众号历史已发布文章总量。任何「历史全量」结论都必须经过多个官方 API、多表关联、去重及覆盖审计；审计完成并经确认前，飞书 Base 同步保持关闭。详见 [已发布文章真值合同](docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md)。
 
 ## 仓库定位
 

@@ -358,3 +358,52 @@ func TestCanonicalSourceKeyMatchesLayoutIdentity(t *testing.T) {
 		t.Fatalf("短链归一错误：%q err=%v", short, err)
 	}
 }
+
+// TestNewFromEnvFallsBackToLegacyToken 只配了旧变量的服务器必须照常启动。
+//
+// 调用方用 log.Fatalf 起服务：如果 NewFromEnv 因为缺 LAYOUT_SYNC_TOKEN 报错，
+// 归档采集、监控和回调会跟着一起退出。为了修一条本来就断着的投递链路赔上整个
+// 服务，不划算——回退用旧值继续跑（投递仍 401，与现状一致），日志提示换配置。
+func TestNewFromEnvFallsBackToLegacyToken(t *testing.T) {
+	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
+	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "https://layout.example.com/api/publish/official-sync")
+	t.Setenv("LAYOUT_SYNC_TOKEN", "")
+	t.Setenv("LAYOUT_ADMIN_PASSWORD", "legacy-value")
+
+	dispatcher, err := NewFromEnv(nil)
+	if err != nil {
+		t.Fatalf("只配旧变量时不得报错（会让整个服务 Fatal 退出）: %v", err)
+	}
+	client, ok := dispatcher.Client.(*HTTPAPI)
+	if !ok || client.SyncToken != "legacy-value" {
+		t.Fatalf("应回退使用旧值: %+v", dispatcher.Client)
+	}
+}
+
+// TestNewFromEnvPrefersSyncToken 新旧都在时以新变量为准。
+func TestNewFromEnvPrefersSyncToken(t *testing.T) {
+	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
+	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "https://layout.example.com/api/publish/official-sync")
+	t.Setenv("LAYOUT_SYNC_TOKEN", "new-token")
+	t.Setenv("LAYOUT_ADMIN_PASSWORD", "legacy-value")
+
+	dispatcher, err := NewFromEnv(nil)
+	if err != nil {
+		t.Fatalf("NewFromEnv: %v", err)
+	}
+	if client, ok := dispatcher.Client.(*HTTPAPI); !ok || client.SyncToken != "new-token" {
+		t.Fatalf("应优先使用 LAYOUT_SYNC_TOKEN: %+v", dispatcher.Client)
+	}
+}
+
+// TestNewFromEnvFailsWhenBothMissing 两个都没有才报错（真·缺配置）。
+func TestNewFromEnvFailsWhenBothMissing(t *testing.T) {
+	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
+	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "https://layout.example.com/api/publish/official-sync")
+	t.Setenv("LAYOUT_SYNC_TOKEN", "")
+	t.Setenv("LAYOUT_ADMIN_PASSWORD", "")
+
+	if _, err := NewFromEnv(nil); err == nil {
+		t.Fatal("两个 token 变量都缺失时必须报错")
+	}
+}

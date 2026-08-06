@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -206,9 +207,21 @@ func NewFromEnv(store *archive.Store) (*Dispatcher, error) {
 		return nil, nil
 	}
 	endpoint := strings.TrimSpace(os.Getenv("LAYOUT_OFFICIAL_SYNC_URL"))
-	// 排版服务 2026-08-04 起用 X-Publish-Sync-Token 认机器提交；旧的
-	// LAYOUT_ADMIN_PASSWORD 已无对端支持，缺配置必须 fail loud 而不是继续 401 空转。
+	// 排版服务 2026-08-04 起用 X-Publish-Sync-Token 认机器提交，旧的
+	// X-Admin-Password 已无对端支持（实测 401）。
+	//
+	// 这里必须容忍只配了旧变量的服务器：调用方是 log.Fatalf 起服务的，直接要求
+	// 新变量会让归档采集、监控和回调跟着一起退出——为了修一条本来就断着的投递
+	// 链路，赔上整个服务，不划算。回退用旧值继续跑（投递仍 401，与现状一致，
+	// 不制造新故障），日志说清楚要换什么；换上正确的 token 后自动恢复。
 	syncToken := strings.TrimSpace(os.Getenv("LAYOUT_SYNC_TOKEN"))
+	if syncToken == "" {
+		if legacy := strings.TrimSpace(os.Getenv("LAYOUT_ADMIN_PASSWORD")); legacy != "" {
+			log.Printf("autolayout: WARN LAYOUT_SYNC_TOKEN 未配置，暂用已废弃的 LAYOUT_ADMIN_PASSWORD；" +
+				"排版服务不再认这个值，投递会持续 401。请把它换成排版服务的 PUBLISH_SYNC_SERVICE_TOKEN")
+			syncToken = legacy
+		}
+	}
 	if endpoint == "" || syncToken == "" {
 		return nil, fmt.Errorf("ENABLE_AUTO_LAYOUT=1 requires LAYOUT_OFFICIAL_SYNC_URL and LAYOUT_SYNC_TOKEN")
 	}

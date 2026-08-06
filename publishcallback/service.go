@@ -31,8 +31,13 @@ const (
 )
 
 type URLSubmitter interface {
-	SubmitURL(ctx context.Context, articleURL string) (autolayout.Receipt, error)
+	SubmitURL(ctx context.Context, article autolayout.Article) (autolayout.Receipt, error)
 }
+
+// callbackClassifierVersion 群发回调侧的分类器标识：按文章页 item_show_type 判定
+// 普通图文/小绿书（见 classifier.go）。与 freepublish article_type 是两条独立证据
+// 链路，版本号分开，便于排版服务侧追溯是哪一版判定放行的。
+const callbackClassifierVersion = "callback-page-itemshowtype-v1"
 
 type Config struct {
 	Token          string
@@ -459,7 +464,14 @@ func (s *Service) RunOnce(ctx context.Context) (*RunResult, error) {
 			continue
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-		receipt, callErr := s.submitter.SubmitURL(callCtx, delivery.SourceURL)
+		// 走到这里的都已通过上面的 unknown/newspic 过滤，是确认的普通图文；
+		// 只投链接，正文由排版服务自己抓（排版服务红线：接口只接收链接）。
+		receipt, callErr := s.submitter.SubmitURL(callCtx, autolayout.Article{
+			URL:               delivery.SourceURL,
+			ContentKind:       "article",
+			Classification:    "ordinary_confirmed",
+			ClassifierVersion: callbackClassifierVersion,
+		})
 		cancel()
 		attemptedAt = s.nowTime()
 		if callErr != nil {

@@ -49,8 +49,13 @@ func (f *fakeClassifier) Classify(_ context.Context, articleURL string) (Classif
 	return Classification{Kind: kind, Reason: "test classification"}, nil
 }
 
-func (f *fakeURLSubmitter) SubmitURL(_ context.Context, articleURL string) (autolayout.Receipt, error) {
-	f.URLs = append(f.URLs, articleURL)
+func (f *fakeURLSubmitter) SubmitURL(_ context.Context, article autolayout.Article) (autolayout.Receipt, error) {
+	// 只投链接：回调侧不得把正文塞给排版服务（排版服务红线）。
+	if article.ContentKind != "article" || article.Classification != "ordinary_confirmed" ||
+		article.ClassifierVersion != callbackClassifierVersion {
+		return autolayout.Receipt{}, fmt.Errorf("投递缺少类型证据: %+v", article)
+	}
+	f.URLs = append(f.URLs, article.URL)
 	if f.FailNext {
 		f.FailNext = false
 		return autolayout.Receipt{}, fmt.Errorf("temporary site-sync failure")

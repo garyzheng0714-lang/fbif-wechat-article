@@ -142,7 +142,12 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 
 - `ENABLE_AUTO_LAYOUT=1`
 - `LAYOUT_OFFICIAL_SYNC_URL`，排版服务的 `/api/publish/official-sync` 完整地址
-- `LAYOUT_ADMIN_PASSWORD`，排版服务管理密码
+- `LAYOUT_SYNC_TOKEN`，排版服务 `PUBLISH_SYNC_SERVICE_TOKEN` 的同值，随请求发在
+  `X-Publish-Sync-Token` 头上。取代 `LAYOUT_ADMIN_PASSWORD`：排版服务 2026-08-04
+  把密码鉴权换成会话角色后，旧的 `X-Admin-Password` 已无对端支持
+
+> 投递载荷**只有文章链接加类型证据**，不含正文、标题、作者与封面——排版服务只接收
+> 链接并自己抓原文，喂二手 HTML 会绕开它按账号规则包取参数的解析路径。
 - `LAYOUT_SOURCE_NAME`，默认 `FBIF食品饮料创新`
 - `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`，默认 `15`；只在北京时间 `08:30` 至 `18:30`（含首尾）生效
 - `AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN`，默认 `20`

@@ -16,14 +16,30 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
 )
 
+// Article 是投递给排版服务的一篇文章。**只有链接**：排版服务只接收链接（其侧红线，
+// 2026-08-06），正文、标题、来源、作者与封面一律由它自己从原文现抓。
+//
+// 为什么不能把我们手里的官方正文传过去（我们明明有）：排版服务的正文解析有两条路，
+// 自抓那条会按账号规则包取参数，收外部正文那条不会；而我们手里的是官方 API 的 HTML，
+// 与网页版结构未必等价。用户报告的排版服务任务 #72 崩坏（长文零小标题、正文段落被
+// 排成灰色图注）即出自后者。
+//
+// 保留的三个字段不是内容，是**类型证据**：官方 freepublish 已确认 article_type=news
+// （普通图文），排版服务据此 fail closed，防止小绿书/图集被误投上站。
 type Article struct {
-	URL         string `json:"url"`
-	Title       string `json:"title"`
-	SourceName  string `json:"source_name"`
-	Author      string `json:"author"`
-	ContentHTML string `json:"content_html"`
-	CoverURL    string `json:"cover_url"`
+	URL               string `json:"url"`
+	ContentKind       string `json:"content_kind"`
+	Classification    string `json:"classification"`
+	ClassifierVersion string `json:"classifier_version"`
 }
+
+const (
+	// 官方 freepublish article_type=news 通过 candidates() 过滤后的正向类型证据。
+	layoutContentKind    = "article"
+	layoutClassification = "ordinary_confirmed"
+	// 分类器版本：语义变化时递增，便于排版服务侧追溯是哪一版判定放行的。
+	layoutClassifierVersion = "official-freepublish-news-v1"
+)
 
 type Receipt struct {
 	JobID    int64
@@ -36,14 +52,21 @@ type API interface {
 }
 
 type URLAPI interface {
-	SubmitURL(ctx context.Context, articleURL string) (Receipt, error)
+	SubmitURL(ctx context.Context, article Article) (Receipt, error)
 }
 
+// HTTPAPI 排版服务客户端。
+//
+// 鉴权走 X-Publish-Sync-Token（排版服务的机器提交通道）。历史上这里发的是
+// X-Admin-Password，但排版服务 2026-08-04 把密码鉴权换成会话角色后就不再认它，
+// 而客户端没跟着改——这条投递链路自那时起对端恒返回 401。
 type HTTPAPI struct {
-	Endpoint      string
-	AdminPassword string
-	Client        *http.Client
+	Endpoint  string
+	SyncToken string
+	Client    *http.Client
 }
+
+const publishSyncTokenHeader = "X-Publish-Sync-Token"
 
 func (c *HTTPAPI) SubmitOfficial(ctx context.Context, article Article) (Receipt, error) {
 	body, err := json.Marshal(article)
@@ -55,7 +78,7 @@ func (c *HTTPAPI) SubmitOfficial(ctx context.Context, article Article) (Receipt,
 		return Receipt{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Admin-Password", c.AdminPassword)
+	req.Header.Set(publishSyncTokenHeader, c.SyncToken)
 	client := c.Client
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
@@ -91,11 +114,11 @@ func (c *HTTPAPI) SubmitOfficial(ctx context.Context, article Article) (Receipt,
 	return Receipt{JobID: response.Job.ID, Stage: response.Job.Stage, Existing: response.Existing}, nil
 }
 
-// SubmitURL sends a published WeChat article URL through the layout service's
-// URL-import endpoint. MASSSENDJOBFINISH contains URLs, not the full official
-// article body used by SubmitOfficial.
-func (c *HTTPAPI) SubmitURL(ctx context.Context, articleURL string) (Receipt, error) {
-	if _, err := CanonicalSourceKey(articleURL); err != nil {
+// SubmitURL 把一篇已发布文章的链接投给排版服务的 site-sync 入口。
+// 与 SubmitOfficial 的差别只在证据来源（群发回调侧的页面分类器 vs freepublish
+// article_type），载荷同样只有链接加类型证据——两个入口都不接收正文。
+func (c *HTTPAPI) SubmitURL(ctx context.Context, article Article) (Receipt, error) {
+	if _, err := CanonicalSourceKey(article.URL); err != nil {
 		return Receipt{}, err
 	}
 	endpoint, err := url.Parse(c.Endpoint)
@@ -106,7 +129,7 @@ func (c *HTTPAPI) SubmitURL(ctx context.Context, articleURL string) (Receipt, er
 	endpoint.RawPath = ""
 	endpoint.RawQuery = ""
 	endpoint.Fragment = ""
-	body, err := json.Marshal(map[string]string{"url": articleURL})
+	body, err := json.Marshal(article)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -115,7 +138,7 @@ func (c *HTTPAPI) SubmitURL(ctx context.Context, articleURL string) (Receipt, er
 		return Receipt{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Admin-Password", c.AdminPassword)
+	req.Header.Set(publishSyncTokenHeader, c.SyncToken)
 	client := c.Client
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
@@ -183,9 +206,11 @@ func NewFromEnv(store *archive.Store) (*Dispatcher, error) {
 		return nil, nil
 	}
 	endpoint := strings.TrimSpace(os.Getenv("LAYOUT_OFFICIAL_SYNC_URL"))
-	password := strings.TrimSpace(os.Getenv("LAYOUT_ADMIN_PASSWORD"))
-	if endpoint == "" || password == "" {
-		return nil, fmt.Errorf("ENABLE_AUTO_LAYOUT=1 requires LAYOUT_OFFICIAL_SYNC_URL and LAYOUT_ADMIN_PASSWORD")
+	// 排版服务 2026-08-04 起用 X-Publish-Sync-Token 认机器提交；旧的
+	// LAYOUT_ADMIN_PASSWORD 已无对端支持，缺配置必须 fail loud 而不是继续 401 空转。
+	syncToken := strings.TrimSpace(os.Getenv("LAYOUT_SYNC_TOKEN"))
+	if endpoint == "" || syncToken == "" {
+		return nil, fmt.Errorf("ENABLE_AUTO_LAYOUT=1 requires LAYOUT_OFFICIAL_SYNC_URL and LAYOUT_SYNC_TOKEN")
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
@@ -200,7 +225,7 @@ func NewFromEnv(store *archive.Store) (*Dispatcher, error) {
 	}
 	return &Dispatcher{
 		Store:         store,
-		Client:        &HTTPAPI{Endpoint: endpoint, AdminPassword: password},
+		Client:        &HTTPAPI{Endpoint: endpoint, SyncToken: syncToken},
 		SourceName:    sourceName,
 		MaxDeliveries: envPositiveInt("AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN", 20),
 	}, nil
@@ -256,13 +281,13 @@ func (d *Dispatcher) Sync(ctx context.Context) (*RunResult, error) {
 	var runErrors []error
 	for _, delivery := range due {
 		result.Attempted++
+		// 只投链接：正文/标题/作者/封面由排版服务从原文现抓（见 Article 头注释）。
+		// candidates() 已把 article_type 过滤到 news，因此这里给出正向类型证据。
 		receipt, callErr := d.Client.SubmitOfficial(ctx, Article{
-			URL:         delivery.SourceURL,
-			Title:       delivery.Title,
-			SourceName:  delivery.SourceName,
-			Author:      delivery.Author,
-			ContentHTML: delivery.ContentHTML,
-			CoverURL:    delivery.CoverURL,
+			URL:               delivery.SourceURL,
+			ContentKind:       layoutContentKind,
+			Classification:    layoutClassification,
+			ClassifierVersion: layoutClassifierVersion,
 		})
 		attemptedAt := d.now()
 		if callErr != nil {
@@ -303,7 +328,7 @@ func (d *Dispatcher) Status(ctx context.Context) (*Status, error) {
 	return status, nil
 }
 
-func (d *Dispatcher) SubmitURL(ctx context.Context, articleURL string) (Receipt, error) {
+func (d *Dispatcher) SubmitURL(ctx context.Context, article Article) (Receipt, error) {
 	if d == nil || d.Client == nil {
 		return Receipt{}, fmt.Errorf("auto-layout dispatcher is not configured")
 	}
@@ -311,7 +336,7 @@ func (d *Dispatcher) SubmitURL(ctx context.Context, articleURL string) (Receipt,
 	if !ok {
 		return Receipt{}, fmt.Errorf("auto-layout client does not support URL import")
 	}
-	return client.SubmitURL(ctx, articleURL)
+	return client.SubmitURL(ctx, article)
 }
 
 func (d *Dispatcher) candidates(ctx context.Context, notBefore int64) ([]archive.LayoutCandidate, int, int, error) {

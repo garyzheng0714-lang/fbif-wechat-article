@@ -121,8 +121,10 @@ func TestDispatcherBaselinesExistingAndDeliversOnlyNewOfficialContent(t *testing
 		t.Fatalf("新官方文章应只投递一次：%+v calls=%d", second, len(fake.articles))
 	}
 	got := fake.articles[0]
-	if got.URL != newURL || got.Title != "新文章" || got.SourceName != "FBIF食品饮料创新" || got.ContentHTML == "" || got.CoverURL == "" {
-		t.Fatalf("投递字段不完整：%+v", got)
+	// 只投链接加类型证据：正文/标题/作者/封面由排版服务从原文现抓（红线）。
+	if got.URL != newURL || got.ContentKind != layoutContentKind ||
+		got.Classification != layoutClassification || got.ClassifierVersion != layoutClassifierVersion {
+		t.Fatalf("投递载荷不符：%+v", got)
 	}
 	// 历史分页可能在启用后才补入数据库；必须按官方 update_time 过滤，不能按
 	// first_seen_at 把旧文章误当新文章。
@@ -263,24 +265,37 @@ func TestDispatcherSkipsNewspicWhenOnlyStableIdentityIsTitleAndIndex(t *testing.
 	}
 }
 
-func TestHTTPAPISendsAdminPasswordAndOfficialBody(t *testing.T) {
+// TestHTTPAPISendsSyncTokenAndURLOnlyBody official-sync 投递必须带排版服务认得的
+// X-Publish-Sync-Token，且载荷里**不得出现任何正文字段**——排版服务会 400 拒收，
+// 而且二手正文正是任务 #72 排版崩坏的成因。
+func TestHTTPAPISendsSyncTokenAndURLOnlyBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Admin-Password") != "secret" {
-			t.Errorf("admin password header missing")
+		if r.Header.Get("X-Publish-Sync-Token") != "secret" {
+			t.Errorf("publish sync token header missing")
 		}
-		var article Article
-		if err := json.NewDecoder(r.Body).Decode(&article); err != nil {
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			t.Errorf("decode: %v", err)
 		}
-		if article.ContentHTML != "<p>正文</p>" {
-			t.Errorf("official body mismatch: %q", article.ContentHTML)
+		for _, banned := range []string{"content_html", "title", "source_name", "author", "cover_url"} {
+			if _, present := raw[banned]; present {
+				t.Errorf("载荷不得包含内容字段 %q: %#v", banned, raw)
+			}
+		}
+		if raw["url"] != "https://mp.weixin.qq.com/s/x" || raw["classification"] != "ordinary_confirmed" {
+			t.Errorf("载荷不符: %#v", raw)
 		}
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"job":{"id":88,"stage":"rendering"},"existing":false}`)
 	}))
 	defer server.Close()
-	client := &HTTPAPI{Endpoint: server.URL, AdminPassword: "secret", Client: server.Client()}
-	receipt, err := client.SubmitOfficial(context.Background(), Article{URL: "https://mp.weixin.qq.com/s/x", ContentHTML: "<p>正文</p>"})
+	client := &HTTPAPI{Endpoint: server.URL, SyncToken: "secret", Client: server.Client()}
+	receipt, err := client.SubmitOfficial(context.Background(), Article{
+		URL:               "https://mp.weixin.qq.com/s/x",
+		ContentKind:       layoutContentKind,
+		Classification:    layoutClassification,
+		ClassifierVersion: layoutClassifierVersion,
+	})
 	if err != nil || receipt.JobID != 88 || receipt.Stage != "rendering" || receipt.Existing {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
 	}
@@ -291,26 +306,36 @@ func TestHTTPAPISubmitURLUsesSiteSync(t *testing.T) {
 		if r.URL.Path != "/api/publish/site-sync" {
 			t.Errorf("path=%q", r.URL.Path)
 		}
-		if r.Header.Get("X-Admin-Password") != "secret" {
-			t.Errorf("admin password header missing")
+		if r.Header.Get("X-Publish-Sync-Token") != "secret" {
+			t.Errorf("publish sync token header missing")
 		}
-		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 			t.Errorf("decode: %v", err)
 		}
-		if body["url"] != "https://mp.weixin.qq.com/s/url-import" {
-			t.Errorf("url mismatch: %#v", body)
+		for _, banned := range []string{"content_html", "title", "source_name", "author", "cover_url"} {
+			if _, present := raw[banned]; present {
+				t.Errorf("载荷不得包含内容字段 %q: %#v", banned, raw)
+			}
+		}
+		if raw["url"] != "https://mp.weixin.qq.com/s/url-import" {
+			t.Errorf("url mismatch: %#v", raw)
 		}
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"job":{"id":89,"stage":"enriching"},"existing":true}`)
 	}))
 	defer server.Close()
 	client := &HTTPAPI{
-		Endpoint:      server.URL + "/api/publish/official-sync",
-		AdminPassword: "secret",
-		Client:        server.Client(),
+		Endpoint:  server.URL + "/api/publish/official-sync",
+		SyncToken: "secret",
+		Client:    server.Client(),
 	}
-	receipt, err := client.SubmitURL(context.Background(), "https://mp.weixin.qq.com/s/url-import")
+	receipt, err := client.SubmitURL(context.Background(), Article{
+		URL:               "https://mp.weixin.qq.com/s/url-import",
+		ContentKind:       layoutContentKind,
+		Classification:    layoutClassification,
+		ClassifierVersion: layoutClassifierVersion,
+	})
 	if err != nil || receipt.JobID != 89 || receipt.Stage != "enriching" || !receipt.Existing {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
 	}

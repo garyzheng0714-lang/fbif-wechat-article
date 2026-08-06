@@ -93,7 +93,9 @@ func (c *ContentCollector) run(ctx context.Context, refreshRecent bool) (*Conten
 	if !hasDraftStream || !hasPublishedStream {
 		return result, fmt.Errorf("draft/freepublish content streams are not configured")
 	}
-	recentStreams := []contentStream{draftStream, publishedStream}
+	// 已发布轮询优先且独立执行；即使本轮预算只剩一次，draft 也不能挤掉
+	// freepublish 最新页。草稿只作为 news/newspic 类型的可选补充。
+	recentStreams := []contentStream{publishedStream, draftStream}
 
 	// Only the latest draft page is retained for the official news/newspic type.
 	// The durable inventory itself is freepublish: media-library inventories and
@@ -111,9 +113,6 @@ func (c *ContentCollector) run(ctx context.Context, refreshRecent bool) (*Conten
 				failed[stream.Name] = true
 				result.Errors[stream.Name] = err.Error()
 				runErrors = append(runErrors, err)
-				if isQuotaError(err) {
-					break
-				}
 				continue
 			}
 			result.Succeeded++
@@ -129,7 +128,7 @@ func (c *ContentCollector) run(ctx context.Context, refreshRecent bool) (*Conten
 				failed[publishedStream.Name] = true
 				result.Errors["freepublish_history"] = err.Error()
 				runErrors = append(runErrors, err)
-			} else if state == nil {
+			} else if state == nil || state.LastSuccessAt == 0 {
 				nextOffset := latestPublishedPage.ItemCount
 				if nextOffset == 0 {
 					nextOffset = len(latestPublishedPage.ObjectIDs)
@@ -293,6 +292,11 @@ func (c *ContentCollector) fetchPage(ctx context.Context, stream contentStream, 
 	info, err := c.Store.SaveContentPage(ctx, stream.Source, response.Body, c.now())
 	if err != nil {
 		return archive.ContentPageInfo{}, err
+	}
+	if stream.Name == "freepublish" && offset == 0 {
+		if err := c.Store.MarkContentRecentSuccess(ctx, stream.Name, c.now()); err != nil {
+			return archive.ContentPageInfo{}, err
+		}
 	}
 	if advanceState {
 		itemCount := info.ItemCount

@@ -87,6 +87,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			wechat_errcode INTEGER NOT NULL DEFAULT 0,
 			wechat_errmsg TEXT NOT NULL DEFAULT '',
 			success INTEGER NOT NULL,
+			deferred INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
 			fetched_at INTEGER NOT NULL
 		)`,
@@ -106,6 +107,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			last_attempt_at INTEGER NOT NULL DEFAULT 0,
 			last_error TEXT NOT NULL DEFAULT '',
 			consecutive_failures INTEGER NOT NULL DEFAULT 0,
+			deferred_pending INTEGER NOT NULL DEFAULT 0,
+			last_deferred_begin TEXT NOT NULL DEFAULT '',
+			last_deferred_end TEXT NOT NULL DEFAULT '',
+			last_deferred_at INTEGER NOT NULL DEFAULT 0,
 			updated_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS official_api_rows (
@@ -175,6 +180,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			total_count INTEGER NOT NULL DEFAULT 0,
 			complete INTEGER NOT NULL DEFAULT 0,
 			last_success_at INTEGER NOT NULL DEFAULT 0,
+			last_recent_success_at INTEGER NOT NULL DEFAULT 0,
 			last_error TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL
 		)`,
@@ -734,6 +740,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "official_api_fetches", "response_ref_id", "INTEGER"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "official_api_fetches", "deferred", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "official_layout_outbox", "published_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
@@ -752,11 +761,39 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "official_api_state", "backfill_complete", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "official_api_state", "deferred_pending", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_api_state", "last_deferred_begin", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_api_state", "last_deferred_end", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_api_state", "last_deferred_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "official_content_articles", "article_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "official_content_articles", "message_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	if err := s.ensureColumn(ctx, "official_content_state", "last_recent_success_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE official_content_state
+		SET last_recent_success_at = COALESCE((
+			SELECT MAX(fetched_at)
+			FROM official_api_fetches
+			WHERE endpoint = 'freepublish_batchget' AND success = 1
+				AND CASE WHEN json_valid(request_json)
+					THEN COALESCE(CAST(json_extract(request_json, '$.offset') AS INTEGER), 0)
+					ELSE -1 END = 0
+		), 0)
+		WHERE stream = 'freepublish' AND last_recent_success_at = 0`); err != nil {
+		return fmt.Errorf("backfill freepublish recent heartbeat: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE official_content_articles
@@ -1117,6 +1154,7 @@ type ContentState struct {
 	ObjectTotalCount        int    `json:"objectTotalCount"`
 	ObjectInventoryComplete bool   `json:"objectInventoryComplete"`
 	LastSuccessAt           int64  `json:"lastSuccessAt"`
+	LastRecentSuccessAt     int64  `json:"lastRecentSuccessAt"`
 	LastError               string `json:"lastError"`
 	UpdatedAt               int64  `json:"updatedAt"`
 }
@@ -1124,11 +1162,11 @@ type ContentState struct {
 func (s *Store) GetContentState(ctx context.Context, stream string) (*ContentState, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT stream, next_offset, total_count, complete, last_success_at,
-			last_error, updated_at
+			last_recent_success_at, last_error, updated_at
 		FROM official_content_state WHERE stream = ?`, stream)
 	var state ContentState
 	var complete int
-	if err := row.Scan(&state.Stream, &state.NextObjectOffset, &state.ObjectTotalCount, &complete, &state.LastSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
+	if err := row.Scan(&state.Stream, &state.NextObjectOffset, &state.ObjectTotalCount, &complete, &state.LastSuccessAt, &state.LastRecentSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -1141,7 +1179,7 @@ func (s *Store) GetContentState(ctx context.Context, stream string) (*ContentSta
 func (s *Store) ListContentStates(ctx context.Context) ([]ContentState, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT stream, next_offset, total_count, complete, last_success_at,
-			last_error, updated_at
+			last_recent_success_at, last_error, updated_at
 		FROM official_content_state ORDER BY stream`)
 	if err != nil {
 		return nil, err
@@ -1151,7 +1189,7 @@ func (s *Store) ListContentStates(ctx context.Context) ([]ContentState, error) {
 	for rows.Next() {
 		var state ContentState
 		var complete int
-		if err := rows.Scan(&state.Stream, &state.NextObjectOffset, &state.ObjectTotalCount, &complete, &state.LastSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
+		if err := rows.Scan(&state.Stream, &state.NextObjectOffset, &state.ObjectTotalCount, &complete, &state.LastSuccessAt, &state.LastRecentSuccessAt, &state.LastError, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		state.ObjectInventoryComplete = complete != 0
@@ -1178,6 +1216,22 @@ func (s *Store) MarkContentPageSuccess(ctx context.Context, stream string, nextO
 			last_error = '',
 			updated_at = excluded.updated_at`,
 		stream, nextOffset, totalCount, boolInt(complete), nowMs, nowMs)
+	return err
+}
+
+// MarkContentRecentSuccess 只记录 offset=0 最新页的成功心跳，不触碰历史分页游标、
+// complete 或历史错误。监控据此区分“最新已发布轮询正常”和“仅历史回填仍在跑”。
+func (s *Store) MarkContentRecentSuccess(ctx context.Context, stream string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	nowMs := now.UnixMilli()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO official_content_state (stream, last_recent_success_at, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(stream) DO UPDATE SET
+			last_recent_success_at = excluded.last_recent_success_at,
+			updated_at = excluded.updated_at`, stream, nowMs, nowMs)
 	return err
 }
 
@@ -1230,8 +1284,13 @@ type FetchRecord struct {
 	WechatErrCode int
 	WechatErrMsg  string
 	Success       bool
+	Deferred      bool
 	Error         string
 	FetchedAt     time.Time
+}
+
+type contextExecer interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
 }
 
 func (s *Store) SaveFetch(ctx context.Context, record FetchRecord) (int64, error) {
@@ -1271,8 +1330,8 @@ func (s *Store) SaveFetch(ctx context.Context, record FetchRecord) (int64, error
 		INSERT INTO official_api_fetches (
 			endpoint, category, begin_date, end_date, request_json, response_json,
 			response_ref_id, response_sha256, http_status, wechat_errcode, wechat_errmsg,
-			success, error, fetched_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			success, deferred, error, fetched_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		record.Endpoint,
 		record.Category,
 		record.BeginDate,
@@ -1285,6 +1344,7 @@ func (s *Store) SaveFetch(ctx context.Context, record FetchRecord) (int64, error
 		record.WechatErrCode,
 		record.WechatErrMsg,
 		boolInt(record.Success),
+		boolInt(record.Deferred),
 		record.Error,
 		record.FetchedAt.UnixMilli(),
 	)
@@ -1304,6 +1364,11 @@ func (s *Store) SaveFetch(ctx context.Context, record FetchRecord) (int64, error
 			if err := upsertComments(ctx, tx, record); err != nil {
 				return 0, err
 			}
+		}
+	}
+	if record.Deferred {
+		if err := markDeferred(ctx, tx, record.Endpoint, record.Category, record.BeginDate, record.EndDate, record.FetchedAt); err != nil {
+			return 0, fmt.Errorf("mark deferred API fetch: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -1590,6 +1655,10 @@ type EndpointState struct {
 	LastAttemptAt       int64  `json:"lastAttemptAt"`
 	LastError           string `json:"lastError"`
 	ConsecutiveFailures int    `json:"consecutiveFailures"`
+	DeferredPending     bool   `json:"deferredPending"`
+	LastDeferredBegin   string `json:"lastDeferredBegin"`
+	LastDeferredEnd     string `json:"lastDeferredEnd"`
+	LastDeferredAt      int64  `json:"lastDeferredAt"`
 	UpdatedAt           int64  `json:"updatedAt"`
 }
 
@@ -1598,10 +1667,11 @@ func (s *Store) GetState(ctx context.Context, endpoint string) (*EndpointState, 
 		SELECT endpoint, category, next_backfill_date, backfill_direction,
 			backfill_complete, last_success_begin,
 			last_success_end, last_success_at, last_attempt_at, last_error,
-			consecutive_failures, updated_at
+			consecutive_failures, deferred_pending, last_deferred_begin,
+			last_deferred_end, last_deferred_at, updated_at
 		FROM official_api_state WHERE endpoint = ?`, endpoint)
 	var state EndpointState
-	var complete int
+	var complete, deferred int
 	if err := row.Scan(
 		&state.Endpoint,
 		&state.Category,
@@ -1614,6 +1684,10 @@ func (s *Store) GetState(ctx context.Context, endpoint string) (*EndpointState, 
 		&state.LastAttemptAt,
 		&state.LastError,
 		&state.ConsecutiveFailures,
+		&deferred,
+		&state.LastDeferredBegin,
+		&state.LastDeferredEnd,
+		&state.LastDeferredAt,
 		&state.UpdatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
@@ -1622,6 +1696,7 @@ func (s *Store) GetState(ctx context.Context, endpoint string) (*EndpointState, 
 		return nil, err
 	}
 	state.BackfillComplete = complete != 0
+	state.DeferredPending = deferred != 0
 	return &state, nil
 }
 
@@ -1661,6 +1736,13 @@ func (s *Store) MarkSuccess(ctx context.Context, endpoint, category, beginDate, 
 			last_attempt_at = excluded.last_attempt_at,
 			last_error = '',
 			consecutive_failures = 0,
+			deferred_pending = CASE
+				WHEN official_api_state.deferred_pending = 1
+					AND official_api_state.last_deferred_begin = excluded.last_success_begin
+					AND official_api_state.last_deferred_end = excluded.last_success_end
+				THEN 0
+				ELSE official_api_state.deferred_pending
+			END,
 			updated_at = excluded.updated_at`,
 		endpoint,
 		category,
@@ -1669,6 +1751,42 @@ func (s *Store) MarkSuccess(ctx context.Context, endpoint, category, beginDate, 
 		beginDate,
 		endDate,
 		nowMs,
+		nowMs,
+		nowMs,
+	)
+	return err
+}
+
+func (s *Store) MarkDeferred(ctx context.Context, endpoint, category, beginDate, endDate string, now time.Time) error {
+	return markDeferred(ctx, s.db, endpoint, category, beginDate, endDate, now)
+}
+
+func markDeferred(ctx context.Context, exec contextExecer, endpoint, category, beginDate, endDate string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	nowMs := now.UnixMilli()
+	_, err := exec.ExecContext(ctx, `
+		INSERT INTO official_api_state (
+			endpoint, category, last_attempt_at, last_error, consecutive_failures,
+			deferred_pending, last_deferred_begin, last_deferred_end,
+			last_deferred_at, updated_at
+		) VALUES (?, ?, ?, '', 0, 1, ?, ?, ?, ?)
+		ON CONFLICT(endpoint) DO UPDATE SET
+			category = excluded.category,
+			last_attempt_at = excluded.last_attempt_at,
+			last_error = '',
+			consecutive_failures = 0,
+			deferred_pending = 1,
+			last_deferred_begin = excluded.last_deferred_begin,
+			last_deferred_end = excluded.last_deferred_end,
+			last_deferred_at = excluded.last_deferred_at,
+			updated_at = excluded.updated_at`,
+		endpoint,
+		category,
+		nowMs,
+		beginDate,
+		endDate,
 		nowMs,
 		nowMs,
 	)
@@ -1723,7 +1841,8 @@ func (s *Store) ListStates(ctx context.Context) ([]EndpointState, error) {
 		SELECT endpoint, category, next_backfill_date, backfill_direction,
 			backfill_complete, last_success_begin,
 			last_success_end, last_success_at, last_attempt_at, last_error,
-			consecutive_failures, updated_at
+			consecutive_failures, deferred_pending, last_deferred_begin,
+			last_deferred_end, last_deferred_at, updated_at
 		FROM official_api_state ORDER BY endpoint`)
 	if err != nil {
 		return nil, err
@@ -1733,7 +1852,7 @@ func (s *Store) ListStates(ctx context.Context) ([]EndpointState, error) {
 	states := make([]EndpointState, 0)
 	for rows.Next() {
 		var state EndpointState
-		var complete int
+		var complete, deferred int
 		if err := rows.Scan(
 			&state.Endpoint,
 			&state.Category,
@@ -1746,11 +1865,16 @@ func (s *Store) ListStates(ctx context.Context) ([]EndpointState, error) {
 			&state.LastAttemptAt,
 			&state.LastError,
 			&state.ConsecutiveFailures,
+			&deferred,
+			&state.LastDeferredBegin,
+			&state.LastDeferredEnd,
+			&state.LastDeferredAt,
 			&state.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		state.BackfillComplete = complete != 0
+		state.DeferredPending = deferred != 0
 		states = append(states, state)
 	}
 	return states, rows.Err()
@@ -1759,6 +1883,7 @@ func (s *Store) ListStates(ctx context.Context) ([]EndpointState, error) {
 type StoreStats struct {
 	Fetches     int64 `json:"fetches"`
 	Failed      int64 `json:"failed"`
+	Deferred    int64 `json:"deferred"`
 	Rows        int64 `json:"rows"`
 	ArticleRows int64 `json:"articleRows"`
 }
@@ -1770,7 +1895,8 @@ func (s *Store) Stats(ctx context.Context) (StoreStats, error) {
 		value *int64
 	}{
 		{`SELECT COUNT(*) FROM official_api_fetches`, &stats.Fetches},
-		{`SELECT COUNT(*) FROM official_api_fetches WHERE success = 0`, &stats.Failed},
+		{`SELECT COUNT(*) FROM official_api_fetches WHERE success = 0 AND deferred = 0`, &stats.Failed},
+		{`SELECT COUNT(*) FROM official_api_fetches WHERE deferred = 1`, &stats.Deferred},
 		{`SELECT COUNT(*) FROM official_api_rows`, &stats.Rows},
 		{`SELECT COUNT(*) FROM official_api_rows WHERE endpoint LIKE 'getarticle%'`, &stats.ArticleRows},
 	}

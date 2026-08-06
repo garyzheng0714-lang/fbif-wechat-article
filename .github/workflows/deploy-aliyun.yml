@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: deploy-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -120,6 +120,9 @@ jobs:
           ALIYUN_USER: ${{ secrets.ALIYUN_USER }}
           APP_DIR: ${{ secrets.APP_DIR }}
           APP_ENV_B64: ${{ secrets.APP_ENV_B64 }}
+          SYNC_SERVICE_TOKEN: ${{ secrets.PUBLISH_SYNC_SERVICE_TOKEN }}
+          REPORTER_WEBHOOK_URL: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_URL }}
+          REPORTER_WEBHOOK_SECRET: ${{ secrets.OFFICIAL_FEISHU_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
           HOST="${ALIYUN_HOST:-112.124.103.65}"
@@ -132,32 +135,146 @@ jobs:
             BIN_DIR="${APP_ROOT}/bin"
             BINARY="${BIN_DIR}/wechat-sync"
             SERVICE_NAME="wechat-sync"
+            UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+            BACKUP_DIR="${APP_ROOT}/deploy-backups/$(date -u +%Y%m%dT%H%M%SZ)"
+            NEW_ENV="/tmp/wechat-sync.env.$$"
+            HAD_BINARY=0
+            HAD_ROOT_ENV=0
+            HAD_BIN_ENV=0
+            HAD_UNIT=0
 
-            mkdir -p "${BIN_DIR}"
+            mkdir -p "${BIN_DIR}" "${BACKUP_DIR}"
+            trap 'rm -f "${NEW_ENV}"' EXIT
 
-            # Stop existing service (PM2 or systemd)
-            pm2 delete wechat-dashboard >/dev/null 2>&1 || true
-            systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-            pkill -9 -f wechat-sync 2>/dev/null || true
-            sleep 2
+            if [ -f "${BINARY}" ]; then
+              cp -p "${BINARY}" "${BACKUP_DIR}/wechat-sync"
+              HAD_BINARY=1
+            fi
+            if [ -f "${APP_ROOT}/.env" ]; then
+              cp -p "${APP_ROOT}/.env" "${BACKUP_DIR}/root.env"
+              HAD_ROOT_ENV=1
+            fi
+            if [ -f "${BIN_DIR}/.env" ]; then
+              cp -p "${BIN_DIR}/.env" "${BACKUP_DIR}/bin.env"
+              HAD_BIN_ENV=1
+            fi
+            if [ -f "${UNIT_FILE}" ]; then
+              cp -p "${UNIT_FILE}" "${BACKUP_DIR}/wechat-sync.service"
+              HAD_UNIT=1
+            fi
 
-            # Install new binary
-            cp /tmp/wechat-sync "${BINARY}"
-            chmod +x "${BINARY}"
-
-            # Copy .env if exists
+            # APP_ENV_B64 是部署环境的真值；只有 secret 未配置时才兼容服务器旧文件。
             SOURCE_ENV=""
-            if [ -f "${APP_ROOT}/current/.env" ]; then
+            if [ -n "${APP_ENV_B64:-}" ]; then
+              printf '%s' "${APP_ENV_B64}" | tr -d '\r\n ' | base64 -d > "${NEW_ENV}"
+              SOURCE_ENV="${NEW_ENV}"
+            elif [ -f "${APP_ROOT}/current/.env" ]; then
               SOURCE_ENV="${APP_ROOT}/current/.env"
             elif [ -f "${APP_ROOT}/.env" ]; then
               SOURCE_ENV="${APP_ROOT}/.env"
+            elif [ -f "${BIN_DIR}/.env" ]; then
+              SOURCE_ENV="${BIN_DIR}/.env"
+            fi
+            if [ -z "${SOURCE_ENV}" ] || [ ! -s "${SOURCE_ENV}" ]; then
+              echo "No non-empty deployment environment is available"
+              exit 1
+            fi
+            if [ "${SOURCE_ENV}" != "${NEW_ENV}" ]; then
+              cp "${SOURCE_ENV}" "${NEW_ENV}"
+              SOURCE_ENV="${NEW_ENV}"
             fi
 
-            if [ -n "${SOURCE_ENV}" ]; then
-              cp "${SOURCE_ENV}" "${BIN_DIR}/.env"
-            elif [ -n "${APP_ENV_B64:-}" ]; then
-              printf '%s' "${APP_ENV_B64}" | tr -d '\r\n ' | base64 -d > "${BIN_DIR}/.env"
+            # 共享服务令牌和日报机器人凭证都可用独立 GitHub Secret 覆盖，避免
+            # 为新增监控能力搬运或重写整份 APP_ENV_B64。Webhook URL 一旦显式
+            # 配置，SECRET 即使为空也必须同步清空，兼容未开启签名校验的机器人。
+            upsert_env_from_b64() {
+              local key="$1"
+              local encoded="$2"
+              local value filtered
+              value="$(printf '%s' "${encoded}" | tr -d '\r\n ' | base64 -d)"
+              case "${value}" in
+                *$'\n'*|*$'\r'*) echo "Deployment secret ${key} contains a newline"; exit 1 ;;
+              esac
+              filtered="${NEW_ENV}.filtered"
+              grep -Ev "^[[:space:]]*(export[[:space:]]+)?${key}=" "${SOURCE_ENV}" > "${filtered}" || true
+              printf '%s=%s\n' "${key}" "${value}" >> "${filtered}"
+              chmod 0600 "${filtered}"
+              mv "${filtered}" "${NEW_ENV}"
+              SOURCE_ENV="${NEW_ENV}"
+            }
+            if [ -n "${PUBLISH_SYNC_SERVICE_TOKEN_B64:-}" ]; then
+              upsert_env_from_b64 PUBLISH_SYNC_SERVICE_TOKEN "${PUBLISH_SYNC_SERVICE_TOKEN_B64}"
             fi
+            if [ -n "${OFFICIAL_ALERT_RELAY_URL_B64:-}" ]; then
+              upsert_env_from_b64 OFFICIAL_ALERT_RELAY_URL "${OFFICIAL_ALERT_RELAY_URL_B64}"
+            fi
+            if [ "${OFFICIAL_FEISHU_OVERRIDE:-0}" = "1" ]; then
+              upsert_env_from_b64 OFFICIAL_FEISHU_WEBHOOK_URL "${OFFICIAL_FEISHU_WEBHOOK_URL_B64:-}"
+              upsert_env_from_b64 OFFICIAL_FEISHU_WEBHOOK_SECRET "${OFFICIAL_FEISHU_WEBHOOK_SECRET_B64:-}"
+            fi
+
+            require_key() {
+              local raw
+              raw="$(sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?${1}=(.*)$/\\2/p" "${SOURCE_ENV}" | tail -n 1)"
+              raw="${raw%$'\r'}"
+              raw="${raw#\"}"
+              raw="${raw%\"}"
+              [ -n "${raw//[[:space:]]/}" ]
+            }
+            require_key API_KEY || { echo "Deployment env missing API_KEY"; exit 1; }
+            if ! require_key WECHAT_APPID && ! require_key WECHAT_MP_APPID; then
+              echo "Deployment env missing WeChat app id"
+              exit 1
+            fi
+            if ! require_key WECHAT_SECRET && ! require_key WECHAT_APPSECRET && ! require_key WECHAT_MP_SECRET; then
+              echo "Deployment env missing WeChat secret"
+              exit 1
+            fi
+            if ! require_key OFFICIAL_FEISHU_WEBHOOK_URL &&
+              ! { require_key FEISHU_APP_ID && require_key FEISHU_APP_SECRET && require_key OFFICIAL_FEISHU_CHAT_ID; } &&
+              ! { require_key OFFICIAL_ALERT_RELAY_URL && require_key PUBLISH_SYNC_SERVICE_TOKEN; }; then
+              echo "Deployment env missing an official alert reporter (webhook, Feishu app, or authenticated relay)"
+              exit 1
+            fi
+            if grep -Eq '^[[:space:]]*(export[[:space:]]+)?ENABLE_AUTO_LAYOUT=(1|true|TRUE)[[:space:]]*$' "${SOURCE_ENV}"; then
+              require_key LAYOUT_OFFICIAL_SYNC_URL || { echo "Deployment env missing LAYOUT_OFFICIAL_SYNC_URL"; exit 1; }
+              require_key PUBLISH_SYNC_SERVICE_TOKEN || { echo "Deployment env missing PUBLISH_SYNC_SERVICE_TOKEN"; exit 1; }
+            fi
+
+            rollback() {
+              echo "Readiness failed; restoring previous official collector release"
+              systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+              if [ "${HAD_BINARY}" -eq 1 ]; then
+                install -m 0755 "${BACKUP_DIR}/wechat-sync" "${BINARY}"
+              else
+                rm -f "${BINARY}"
+              fi
+              if [ "${HAD_ROOT_ENV}" -eq 1 ]; then
+                install -m 0600 "${BACKUP_DIR}/root.env" "${APP_ROOT}/.env"
+              else
+                rm -f "${APP_ROOT}/.env"
+              fi
+              if [ "${HAD_BIN_ENV}" -eq 1 ]; then
+                install -m 0600 "${BACKUP_DIR}/bin.env" "${BIN_DIR}/.env"
+              else
+                rm -f "${BIN_DIR}/.env"
+              fi
+              if [ "${HAD_UNIT}" -eq 1 ]; then
+                install -m 0644 "${BACKUP_DIR}/wechat-sync.service" "${UNIT_FILE}"
+              else
+                rm -f "${UNIT_FILE}"
+              fi
+              systemctl daemon-reload
+              if [ "${HAD_BINARY}" -eq 1 ] && [ "${HAD_UNIT}" -eq 1 ]; then
+                systemctl start "${SERVICE_NAME}" || true
+              fi
+            }
+
+            pm2 delete wechat-dashboard >/dev/null 2>&1 || true
+            systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+            install -m 0755 /tmp/wechat-sync "${BINARY}"
+            install -m 0600 "${SOURCE_ENV}" "${APP_ROOT}/.env"
+            install -m 0600 "${SOURCE_ENV}" "${BIN_DIR}/.env"
 
             # Create systemd service
             printf '%s\n' \
@@ -177,7 +294,7 @@ jobs:
               '' \
               '[Install]' \
               'WantedBy=multi-user.target' \
-              > /etc/systemd/system/${SERVICE_NAME}.service
+              > "${UNIT_FILE}"
 
             systemctl daemon-reload
             systemctl enable "${SERVICE_NAME}"
@@ -185,24 +302,41 @@ jobs:
 
             # Health is operational readiness only. Historical coverage and
             # Base-write approval remain separately fail-closed in the API.
+            READY=0
             for attempt in $(seq 1 60); do
-              if curl -fsS "http://127.0.0.1:3002/health" >/dev/null; then
+              if curl -fsS --max-time 5 "http://127.0.0.1:3002/health" >/dev/null; then
+                READY=1
                 break
-              fi
-              if [ "${attempt}" -eq 60 ]; then
-                journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
-                echo "Official API readiness did not become healthy"
-                exit 1
               fi
               sleep 3
             done
+            if [ "${READY}" -ne 1 ]; then
+              journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
+              rollback
+              exit 1
+            fi
 
-            echo "Deploy complete: $(${BINARY} --version 2>/dev/null || echo 'binary installed')"
+            echo "Deploy complete: official collector is healthy"
           REMOTE_SCRIPT
 
+          OFFICIAL_FEISHU_OVERRIDE=0
+          PUBLISH_SYNC_SERVICE_TOKEN_B64=""
+          OFFICIAL_FEISHU_WEBHOOK_URL_B64=""
+          OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=""
+          OFFICIAL_ALERT_RELAY_URL_B64="$(printf '%s' 'https://fbifmp-layout.foodtalks.cn/api/publish/monitor-alert' | base64 -w 0)"
+          if [ -n "${REPORTER_WEBHOOK_URL:-}" ]; then
+            OFFICIAL_FEISHU_OVERRIDE=1
+            OFFICIAL_FEISHU_WEBHOOK_URL_B64="$(printf '%s' "${REPORTER_WEBHOOK_URL}" | base64 -w 0)"
+            OFFICIAL_FEISHU_WEBHOOK_SECRET_B64="$(printf '%s' "${REPORTER_WEBHOOK_SECRET:-}" | base64 -w 0)"
+          fi
+          if [ -n "${SYNC_SERVICE_TOKEN:-}" ]; then
+            PUBLISH_SYNC_SERVICE_TOKEN_B64="$(printf '%s' "${SYNC_SERVICE_TOKEN}" | base64 -w 0)"
+          fi
+
           REMOTE_ENV="$(printf \
-            "APP_DIR=%q APP_ENV_B64=%q" \
-            "${APP_DIR:-}" "${APP_ENV_B64:-}")"
+            "APP_DIR=%q APP_ENV_B64=%q PUBLISH_SYNC_SERVICE_TOKEN_B64=%q OFFICIAL_ALERT_RELAY_URL_B64=%q OFFICIAL_FEISHU_OVERRIDE=%q OFFICIAL_FEISHU_WEBHOOK_URL_B64=%q OFFICIAL_FEISHU_WEBHOOK_SECRET_B64=%q" \
+            "${APP_DIR:-}" "${APP_ENV_B64:-}" "${PUBLISH_SYNC_SERVICE_TOKEN_B64}" "${OFFICIAL_ALERT_RELAY_URL_B64}" "${OFFICIAL_FEISHU_OVERRIDE}" \
+            "${OFFICIAL_FEISHU_WEBHOOK_URL_B64}" "${OFFICIAL_FEISHU_WEBHOOK_SECRET_B64}")"
 
           ssh \
             -i ~/.ssh/id_aliyun \

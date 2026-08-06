@@ -2,21 +2,27 @@ package wechat
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 type dailyQuotaState struct {
-	Date  string `json:"date"`
-	Count int    `json:"count"`
+	Version int            `json:"version,omitempty"`
+	Date    string         `json:"date"`
+	Count   int            `json:"count,omitempty"`
+	Counts  map[string]int `json:"counts,omitempty"`
 }
 
 type DailyQuotaStatus struct {
+	Endpoint        string `json:"endpoint,omitempty"`
 	Date            string `json:"date"`
 	Limit           int    `json:"limit"`
 	Reserve         int    `json:"reserve"`
@@ -38,6 +44,9 @@ var (
 )
 
 func quotaFilePath() string {
+	if configured := strings.TrimSpace(os.Getenv("WECHAT_QUOTA_FILE")); configured != "" {
+		return configured
+	}
 	cwd, _ := os.Getwd()
 	return filepath.Join(cwd, ".wechat-quota.json")
 }
@@ -50,59 +59,214 @@ func loadQuota(today string) *dailyQuotaState {
 			return &q
 		}
 	}
-	return &dailyQuotaState{Date: today}
+	return &dailyQuotaState{Version: 2, Date: today, Counts: make(map[string]int)}
 }
 
-func saveQuota(q *dailyQuotaState) {
-	data, _ := json.Marshal(q)
-	_ = os.WriteFile(quotaFilePath(), data, 0644)
+func saveQuota(q *dailyQuotaState) error {
+	q.Version = 2
+	data, err := json.Marshal(q)
+	if err != nil {
+		return fmt.Errorf("encode WeChat quota: %w", err)
+	}
+	path := quotaFilePath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create WeChat quota directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".wechat-quota-*")
+	if err != nil {
+		return fmt.Errorf("create temporary WeChat quota file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("secure temporary WeChat quota file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temporary WeChat quota file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temporary WeChat quota file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temporary WeChat quota file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace WeChat quota file: %w", err)
+	}
+	if dirHandle, err := os.Open(dir); err == nil {
+		_ = dirHandle.Sync()
+		_ = dirHandle.Close()
+	}
+	return nil
+}
+
+// MigrateLegacyDailyQuota replaces an unattributed v1 global count with exact
+// per-endpoint reservations reconstructed from the durable API fetch ledger.
+// A mismatch fails closed so an ambiguous global count is never reset or
+// copied onto every endpoint.
+func MigrateLegacyDailyQuota(reconstructed map[string]int) (bool, error) {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today := time.Now().In(ShanghaiLoc()).Format("2006-01-02")
+	current := loadQuota(today)
+	if current.Count <= 0 {
+		quotaCache = current
+		return false, nil
+	}
+	counts := make(map[string]int, len(reconstructed))
+	total := 0
+	for endpoint, count := range reconstructed {
+		if strings.TrimSpace(endpoint) == "" || count < 0 {
+			return false, fmt.Errorf("invalid reconstructed quota count for %q: %d", endpoint, count)
+		}
+		if count == 0 {
+			continue
+		}
+		counts[endpoint] = count
+		total += count
+	}
+	if total != current.Count {
+		return false, fmt.Errorf("legacy WeChat quota migration mismatch: archived=%d legacy=%d", total, current.Count)
+	}
+	migrated := &dailyQuotaState{Version: 2, Date: today, Counts: counts}
+	if err := saveQuota(migrated); err != nil {
+		return false, err
+	}
+	quotaCache = migrated
+	return true, nil
+}
+
+// LegacyDailyQuotaMigrationNeeded avoids scanning the archive on normal v2
+// startups. It only reports whether today's quota file still has an
+// unattributed global count.
+func LegacyDailyQuotaMigrationNeeded() bool {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today := time.Now().In(ShanghaiLoc()).Format("2006-01-02")
+	current := loadQuota(today)
+	quotaCache = current
+	return current.Count > 0
 }
 
 func dailyQuotaLimit() int {
-	if v := os.Getenv("WECHAT_DAILY_QUOTA_LIMIT"); v != "" {
+	for _, name := range []string{"WECHAT_ENDPOINT_DAILY_QUOTA_LIMIT", "WECHAT_DAILY_QUOTA_LIMIT"} {
+		v := strings.TrimSpace(os.Getenv(name))
+		if v == "" {
+			continue
+		}
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 1000 {
+				return 1000
+			}
 			return n
 		}
 	}
-	return 1500
+	return 1000
 }
 
 func dailyQuotaReserve() int {
-	if v := os.Getenv("WECHAT_DAILY_QUOTA_RESERVE_PERCENT"); v != "" {
+	for _, name := range []string{"WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE_PERCENT", "WECHAT_DAILY_QUOTA_RESERVE_PERCENT"} {
+		v := strings.TrimSpace(os.Getenv(name))
+		if v == "" {
+			continue
+		}
 		if percent, err := strconv.ParseFloat(v, 64); err == nil && percent >= 0 && percent < 100 {
 			return int(math.Ceil(float64(dailyQuotaLimit()) * percent / 100))
 		}
 	}
-	if v := os.Getenv("WECHAT_DAILY_QUOTA_RESERVE"); v != "" {
+	for _, name := range []string{"WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE", "WECHAT_DAILY_QUOTA_RESERVE"} {
+		v := strings.TrimSpace(os.Getenv(name))
+		if v == "" {
+			continue
+		}
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
 		}
 	}
-	return int(math.Ceil(float64(dailyQuotaLimit()) * 0.02))
+	return 200
 }
 
-// CurrentDailyQuotaStatus 返回本进程与同一工作目录中的持久计数快照，不消耗额度。
-// UsableRemaining 已扣除硬保留额度，供历史回填调度继续预留当天常规轮询。
-func CurrentDailyQuotaStatus() DailyQuotaStatus {
-	quotaMu.Lock()
-	defer quotaMu.Unlock()
+func quotaUsed(q *dailyQuotaState, endpoint string) int {
+	used := q.Count
+	if q.Counts != nil && q.Counts[endpoint] > used {
+		used = q.Counts[endpoint]
+	}
+	return used
+}
+
+func currentQuotaState() (string, *dailyQuotaState) {
 	today := time.Now().In(ShanghaiLoc()).Format("2006-01-02")
 	if quotaCache == nil || quotaCache.Date != today {
 		quotaCache = loadQuota(today)
 	}
+	if quotaCache.Counts == nil {
+		quotaCache.Counts = make(map[string]int)
+	}
+	return today, quotaCache
+}
+
+func quotaStatus(today string, q *dailyQuotaState, endpoint string) DailyQuotaStatus {
 	limit := dailyQuotaLimit()
 	reserve := dailyQuotaReserve()
-	usableRemaining := limit - reserve - quotaCache.Count
+	used := quotaUsed(q, endpoint)
+	usableRemaining := limit - reserve - used
 	if usableRemaining < 0 {
 		usableRemaining = 0
 	}
 	return DailyQuotaStatus{
+		Endpoint:        endpoint,
 		Date:            today,
 		Limit:           limit,
 		Reserve:         reserve,
-		Used:            quotaCache.Count,
+		Used:            used,
 		UsableRemaining: usableRemaining,
 	}
+}
+
+// CurrentEndpointQuotaStatus 返回单个官方接口的持久计数快照，不消耗额度。
+func CurrentEndpointQuotaStatus(endpoint string) DailyQuotaStatus {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today, q := currentQuotaState()
+	return quotaStatus(today, q, endpoint)
+}
+
+// CurrentDailyQuotaStatuses 返回当天已经调用过的各接口配额快照。
+func CurrentDailyQuotaStatuses() []DailyQuotaStatus {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today, q := currentQuotaState()
+	endpoints := make([]string, 0, len(q.Counts))
+	for endpoint := range q.Counts {
+		endpoints = append(endpoints, endpoint)
+	}
+	sort.Strings(endpoints)
+	statuses := make([]DailyQuotaStatus, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		statuses = append(statuses, quotaStatus(today, q, endpoint))
+	}
+	return statuses
+}
+
+// CurrentDailyQuotaStatus 保留旧调用兼容；Used 取所有接口中的最大值，
+// 不再代表可跨接口共享的全局混池。
+func CurrentDailyQuotaStatus() DailyQuotaStatus {
+	quotaMu.Lock()
+	defer quotaMu.Unlock()
+	today, q := currentQuotaState()
+	maxUsed := q.Count
+	for _, count := range q.Counts {
+		if count > maxUsed {
+			maxUsed = count
+		}
+	}
+	compat := *q
+	compat.Count = maxUsed
+	return quotaStatus(today, &compat, "")
 }
 
 // checkAndIncrementQuota checks the daily quota and increments the counter.
@@ -114,7 +278,10 @@ func checkAndIncrementQuota(endpoint string) error {
 	today := time.Now().In(ShanghaiLoc()).Format("2006-01-02")
 	if quotaCache == nil || quotaCache.Date != today {
 		quotaCache = loadQuota(today)
-		log.Printf("[Quota] Today (%s) API calls so far: %d/%d", today, quotaCache.Count, dailyQuotaLimit())
+		log.Printf("[Quota] Loaded endpoint quota counters for %s", today)
+	}
+	if quotaCache.Counts == nil {
+		quotaCache.Counts = make(map[string]int)
 	}
 
 	limit := dailyQuotaLimit()
@@ -122,16 +289,26 @@ func checkAndIncrementQuota(endpoint string) error {
 	if effectiveLimit < 0 {
 		effectiveLimit = 0
 	}
-	if quotaCache.Count >= effectiveLimit {
-		log.Printf("[Quota] Daily usable limit reached (%d/%d, reserve=%d), blocking call to %s",
-			quotaCache.Count, limit, dailyQuotaReserve(), endpoint)
+	used := quotaUsed(quotaCache, endpoint)
+	if used >= effectiveLimit {
+		log.Printf("[Quota] Endpoint usable limit reached for %s (%d/%d, reserve=%d)",
+			endpoint, used, limit, dailyQuotaReserve())
 		return &QuotaLimitError{Endpoint: endpoint + " (daily-limit-reached)"}
 	}
 
-	quotaCache.Count++
-	if quotaCache.Count%100 == 0 || quotaCache.Count == effectiveLimit-1 {
-		log.Printf("[Quota] Today's API calls: %d/%d", quotaCache.Count, limit)
+	previous, existed := quotaCache.Counts[endpoint]
+	used++
+	quotaCache.Counts[endpoint] = used
+	if err := saveQuota(quotaCache); err != nil {
+		if existed {
+			quotaCache.Counts[endpoint] = previous
+		} else {
+			delete(quotaCache.Counts, endpoint)
+		}
+		return fmt.Errorf("persist WeChat quota reservation for %s: %w", endpoint, err)
 	}
-	saveQuota(quotaCache)
+	if used%100 == 0 || used == effectiveLimit-1 {
+		log.Printf("[Quota] Today's %s calls: %d/%d", endpoint, used, limit)
+	}
 	return nil
 }

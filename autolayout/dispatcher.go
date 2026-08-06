@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,13 +16,14 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
 )
 
-// Article 是投递给排版服务的一篇文章。**只有链接**：排版服务只接收链接（其侧红线，
-// 2026-08-06），正文、标题、来源、作者与封面一律由它自己从原文现抓。
+// Article 是投递给排版服务的一篇文章。**只有链接**：排版服务的两个发布入口自
+// 2026-08-06 起只接收链接，带 content_html / title / source_name / author /
+// cover_url 一律 400；正文、标题、来源、作者与封面全部由它自己从原文现抓。
 //
 // 为什么不能把我们手里的官方正文传过去（我们明明有）：排版服务的正文解析有两条路，
 // 自抓那条会按账号规则包取参数，收外部正文那条不会；而我们手里的是官方 API 的 HTML，
-// 与网页版结构未必等价。用户报告的排版服务任务 #72 崩坏（长文零小标题、正文段落被
-// 排成灰色图注）即出自后者。
+// 与网页版结构未必等价。用户报告的排版服务任务 #72 崩坏（4.7 万字长文零小标题、
+// 正文段落被排成灰色图注）即出自后者；同一篇原文只投链接时小标题识别出 7 个。
 //
 // 保留的三个字段不是内容，是**类型证据**：官方 freepublish 已确认 article_type=news
 // （普通图文），排版服务据此 fail closed，防止小绿书/图集被误投上站。
@@ -35,11 +35,11 @@ type Article struct {
 }
 
 const (
-	// 官方 freepublish article_type=news 通过 candidates() 过滤后的正向类型证据。
+	// 官方 freepublish article_type=news 经 candidates() 过滤后的正向类型证据。
 	layoutContentKind    = "article"
 	layoutClassification = "ordinary_confirmed"
-	// 分类器版本：语义变化时递增，便于排版服务侧追溯是哪一版判定放行的。
-	layoutClassifierVersion = "official-freepublish-news-v1"
+	// 分类器版本沿用生产在用的取值，便于排版服务侧追溯是哪一版判定放行的。
+	layoutClassifierVersion = "wechat-official-freepublish-v1"
 )
 
 type Receipt struct {
@@ -56,35 +56,55 @@ type URLAPI interface {
 	SubmitURL(ctx context.Context, article Article) (Receipt, error)
 }
 
-// HTTPAPI 排版服务客户端。
-//
-// 鉴权走 X-Publish-Sync-Token（排版服务的机器提交通道）。历史上这里发的是
-// X-Admin-Password，但排版服务 2026-08-04 把密码鉴权换成会话角色后就不再认它，
-// 而客户端没跟着改——这条投递链路自那时起对端恒返回 401。
 type HTTPAPI struct {
-	Endpoint  string
-	SyncToken string
-	Client    *http.Client
+	Endpoint     string
+	ServiceToken string
+	Client       *http.Client
 }
 
-const publishSyncTokenHeader = "X-Publish-Sync-Token"
+func layoutHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	safeClient := *client
+	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &safeClient
+}
+
+func validateLayoutEndpoint(raw string) (*url.URL, error) {
+	endpoint, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return nil, fmt.Errorf("layout official-sync endpoint is invalid")
+	}
+	if endpoint.Scheme != "https" && !layoutLoopbackHost(endpoint.Hostname()) {
+		return nil, fmt.Errorf("layout official-sync endpoint must use HTTPS outside local loopback")
+	}
+	return endpoint, nil
+}
 
 func (c *HTTPAPI) SubmitOfficial(ctx context.Context, article Article) (Receipt, error) {
+	if strings.TrimSpace(c.ServiceToken) == "" {
+		return Receipt{}, fmt.Errorf("layout official-sync service token is missing")
+	}
+	endpoint, err := validateLayoutEndpoint(c.Endpoint)
+	if err != nil {
+		return Receipt{}, err
+	}
+	// 证据由判定方填进 Article（dispatcher 用 freepublish article_type，
+	// publishcallback 用页面 item_show_type），不在传输层硬编码。
 	body, err := json.Marshal(article)
 	if err != nil {
 		return Receipt{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 	if err != nil {
 		return Receipt{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(publishSyncTokenHeader, c.SyncToken)
-	client := c.Client
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	resp, err := client.Do(req)
+	req.Header.Set("X-Publish-Sync-Token", c.ServiceToken)
+	resp, err := layoutHTTPClient(c.Client).Do(req)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -115,16 +135,19 @@ func (c *HTTPAPI) SubmitOfficial(ctx context.Context, article Article) (Receipt,
 	return Receipt{JobID: response.Job.ID, Stage: response.Job.Stage, Existing: response.Existing}, nil
 }
 
-// SubmitURL 把一篇已发布文章的链接投给排版服务的 site-sync 入口。
-// 与 SubmitOfficial 的差别只在证据来源（群发回调侧的页面分类器 vs freepublish
-// article_type），载荷同样只有链接加类型证据——两个入口都不接收正文。
+// SubmitURL 把一篇已发布文章的链接投给排版服务的 site-sync 入口。与 SubmitOfficial
+// 的差别只在证据来源（群发回调侧的页面分类器 vs freepublish article_type），载荷
+// 同样只有链接加类型证据——两个入口都不接收正文。
 func (c *HTTPAPI) SubmitURL(ctx context.Context, article Article) (Receipt, error) {
 	if _, err := CanonicalSourceKey(article.URL); err != nil {
 		return Receipt{}, err
 	}
-	endpoint, err := url.Parse(c.Endpoint)
-	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
-		return Receipt{}, fmt.Errorf("layout official-sync endpoint is invalid")
+	if strings.TrimSpace(c.ServiceToken) == "" {
+		return Receipt{}, fmt.Errorf("layout official-sync service token is missing")
+	}
+	endpoint, err := validateLayoutEndpoint(c.Endpoint)
+	if err != nil {
+		return Receipt{}, err
 	}
 	endpoint.Path = "/api/publish/site-sync"
 	endpoint.RawPath = ""
@@ -139,12 +162,8 @@ func (c *HTTPAPI) SubmitURL(ctx context.Context, article Article) (Receipt, erro
 		return Receipt{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(publishSyncTokenHeader, c.SyncToken)
-	client := c.Client
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
-	}
-	resp, err := client.Do(req)
+	req.Header.Set("X-Publish-Sync-Token", c.ServiceToken)
+	resp, err := layoutHTTPClient(c.Client).Do(req)
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -207,27 +226,13 @@ func NewFromEnv(store *archive.Store) (*Dispatcher, error) {
 		return nil, nil
 	}
 	endpoint := strings.TrimSpace(os.Getenv("LAYOUT_OFFICIAL_SYNC_URL"))
-	// 排版服务 2026-08-04 起用 X-Publish-Sync-Token 认机器提交，旧的
-	// X-Admin-Password 已无对端支持（实测 401）。
-	//
-	// 这里必须容忍只配了旧变量的服务器：调用方是 log.Fatalf 起服务的，直接要求
-	// 新变量会让归档采集、监控和回调跟着一起退出——为了修一条本来就断着的投递
-	// 链路，赔上整个服务，不划算。回退用旧值继续跑（投递仍 401，与现状一致，
-	// 不制造新故障），日志说清楚要换什么；换上正确的 token 后自动恢复。
-	syncToken := strings.TrimSpace(os.Getenv("LAYOUT_SYNC_TOKEN"))
-	if syncToken == "" {
-		if legacy := strings.TrimSpace(os.Getenv("LAYOUT_ADMIN_PASSWORD")); legacy != "" {
-			log.Printf("autolayout: WARN LAYOUT_SYNC_TOKEN 未配置，暂用已废弃的 LAYOUT_ADMIN_PASSWORD；" +
-				"排版服务不再认这个值，投递会持续 401。请把它换成排版服务的 PUBLISH_SYNC_SERVICE_TOKEN")
-			syncToken = legacy
-		}
+	serviceToken := strings.TrimSpace(os.Getenv("PUBLISH_SYNC_SERVICE_TOKEN"))
+	if endpoint == "" || serviceToken == "" {
+		return nil, fmt.Errorf("ENABLE_AUTO_LAYOUT=1 requires LAYOUT_OFFICIAL_SYNC_URL and PUBLISH_SYNC_SERVICE_TOKEN")
 	}
-	if endpoint == "" || syncToken == "" {
-		return nil, fmt.Errorf("ENABLE_AUTO_LAYOUT=1 requires LAYOUT_OFFICIAL_SYNC_URL and LAYOUT_SYNC_TOKEN")
-	}
-	parsed, err := url.Parse(endpoint)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
-		return nil, fmt.Errorf("LAYOUT_OFFICIAL_SYNC_URL is invalid")
+	parsed, err := validateLayoutEndpoint(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("LAYOUT_OFFICIAL_SYNC_URL is invalid: %w", err)
 	}
 	if parsed.Path != "/api/publish/official-sync" {
 		return nil, fmt.Errorf("LAYOUT_OFFICIAL_SYNC_URL must end with /api/publish/official-sync")
@@ -238,10 +243,19 @@ func NewFromEnv(store *archive.Store) (*Dispatcher, error) {
 	}
 	return &Dispatcher{
 		Store:         store,
-		Client:        &HTTPAPI{Endpoint: endpoint, SyncToken: syncToken},
+		Client:        &HTTPAPI{Endpoint: endpoint, ServiceToken: serviceToken},
 		SourceName:    sourceName,
 		MaxDeliveries: envPositiveInt("AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN", 20),
 	}, nil
+}
+
+func layoutLoopbackHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func Enabled() bool {

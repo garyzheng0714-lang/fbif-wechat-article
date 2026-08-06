@@ -1,0 +1,165 @@
+name: External Sync Watchdog
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fbif-external-sync-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore alert state
+        uses: actions/cache/restore@v4
+        with:
+          path: .watchdog-state.json
+          key: sync-watchdog-state-${{ github.run_id }}
+          restore-keys: |
+            sync-watchdog-state-
+
+      - name: Test watchdog
+        run: python3 -m unittest tools/test_external_watchdog.py
+
+      - name: Prepare authenticated monitoring access
+        id: credentials
+        continue-on-error: true
+        env:
+          ALIYUN_HOST: ${{ secrets.ALIYUN_HOST }}
+          ALIYUN_USER: ${{ secrets.ALIYUN_USER }}
+          ALIYUN_SSH_KEY: ${{ secrets.ALIYUN_SSH_KEY }}
+          ALIYUN_SSH_KEY_B64: ${{ secrets.ALIYUN_SSH_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          HOST="${ALIYUN_HOST:-112.124.103.65}"
+          USER="${ALIYUN_USER:-root}"
+          mkdir -p ~/.ssh
+
+          if [ -n "${ALIYUN_SSH_KEY:-}" ]; then
+            RAW_KEY="$(printf '%b' "${ALIYUN_SSH_KEY}" | tr -d '\r')"
+            if printf '%s' "${RAW_KEY}" | grep -q -- '-----BEGIN OPENSSH PRIVATE KEY-----'; then
+              printf '%s\n' "${RAW_KEY}" | awk '
+                /-----BEGIN OPENSSH PRIVATE KEY-----/ {in_key=1}
+                in_key {print}
+                /-----END OPENSSH PRIVATE KEY-----/ {if (in_key) {exit}}
+              ' > ~/.ssh/id_watchdog
+            else
+              printf '%s' "${RAW_KEY}" > ~/.ssh/id_watchdog
+            fi
+          else
+            test -n "${ALIYUN_SSH_KEY_B64:-}"
+            printf '%s' "${ALIYUN_SSH_KEY_B64}" | tr -d '\r\n ' | base64 -d > ~/.ssh/id_watchdog
+          fi
+          chmod 600 ~/.ssh/id_watchdog
+          ssh-keygen -y -f ~/.ssh/id_watchdog >/dev/null
+
+          SSH_ARGS=(
+            -i ~/.ssh/id_watchdog
+            -o BatchMode=yes
+            -o ConnectTimeout=10
+            -o StrictHostKeyChecking=accept-new
+          )
+          PUBLISH_SYNC_SERVICE_TOKEN="$(
+            ssh "${SSH_ARGS[@]}" "${USER}@${HOST}" '
+              set -e
+              for file in /opt/fbif-wechat-article-dashboard/.env /opt/fbif-wechat-article-dashboard/bin/.env; do
+                if [ -f "$file" ]; then
+                  set -a
+                  . "$file"
+                  set +a
+                  if [ -n "${PUBLISH_SYNC_SERVICE_TOKEN:-}" ]; then
+                    printf "%s" "$PUBLISH_SYNC_SERVICE_TOKEN"
+                    exit 0
+                  fi
+                fi
+              done
+              exit 1
+            '
+          )"
+          test -n "${PUBLISH_SYNC_SERVICE_TOKEN}"
+          case "${PUBLISH_SYNC_SERVICE_TOKEN}" in
+            *$'\n'*|*$'\r'*) echo "monitoring service token contains a newline"; exit 1 ;;
+          esac
+          echo "::add-mask::${PUBLISH_SYNC_SERVICE_TOKEN}"
+          printf 'PUBLISH_SYNC_SERVICE_TOKEN=%s\n' "${PUBLISH_SYNC_SERVICE_TOKEN}" >> "$GITHUB_ENV"
+          printf 'OFFICIAL_ALERT_RELAY_URL=%s\n' "https://fbifmp-layout.foodtalks.cn/api/publish/monitor-alert" >> "$GITHUB_ENV"
+
+          ssh -f -N "${SSH_ARGS[@]}" \
+            -o ExitOnForwardFailure=yes \
+            -L 13002:127.0.0.1:3002 \
+            "${USER}@${HOST}"
+
+      - name: Probe all three services
+        if: always()
+        id: probe
+        continue-on-error: true
+        run: python3 tools/external_watchdog.py --issue-only
+
+      - name: Save alert state
+        if: always() && hashFiles('.watchdog-state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .watchdog-state.json
+          key: sync-watchdog-state-${{ github.run_id }}
+
+      - name: Persist incident as GitHub issue
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          WATCHDOG_STATE: .watchdog-state.json
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[P0] FBIF 公众号监控链路异常';
+            let state = { healthy: false, issues: ['github_watchdog_state_missing'] };
+            if (fs.existsSync(process.env.WATCHDOG_STATE)) {
+              try {
+                state = JSON.parse(fs.readFileSync(process.env.WATCHDOG_STATE, 'utf8'));
+              } catch (_) {
+                state = { healthy: false, issues: ['github_watchdog_state_invalid'] };
+              }
+            }
+            const { owner, repo } = context.repo;
+            const listed = await github.rest.issues.listForRepo({ owner, repo, state: 'open', per_page: 100 });
+            const incident = listed.data.find(issue => !issue.pull_request && issue.title === title);
+            const issues = Array.isArray(state.issues) && state.issues.length ? state.issues : ['watchdog_not_ready'];
+            const runURL = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const body = [
+              '该 Issue 由外部看门狗自动维护；即使飞书或排版主机不可达，也会留下持久事故记录。',
+              '',
+              `检查时间：${state.checked_at || 'unknown'}`,
+              `运行记录：${runURL}`,
+              '',
+              ...issues.slice(0, 30).map(issue => `- ${String(issue).slice(0, 300)}`),
+            ].join('\n');
+            if (state.healthy === true) {
+              if (incident) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: incident.number, body: `自动探针已恢复。\n\n${runURL}` });
+                await github.rest.issues.update({ owner, repo, issue_number: incident.number, state: 'closed' });
+              }
+            } else if (incident) {
+              await github.rest.issues.update({ owner, repo, issue_number: incident.number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title, body });
+            }
+
+      - name: Enforce watchdog result
+        if: always() && (steps.credentials.outcome != 'success' || steps.probe.outcome != 'success')
+        run: exit 1
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f ~/.ssh/id_watchdog /tmp/official-watchdog.env

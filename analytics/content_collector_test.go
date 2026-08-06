@@ -53,6 +53,18 @@ type orderedPublishedClient struct {
 	detailIDs []string
 }
 
+type draftQuotaContentClient struct {
+	delegate fakeContentClient
+}
+
+func (f *draftQuotaContentClient) Call(ctx context.Context, endpoint wechat.ContentEndpoint, payload interface{}) (*wechat.RawAPIResponse, error) {
+	if endpoint.Name == "draft_batchget" {
+		f.delegate.calls = append(f.delegate.calls, endpoint.Name)
+		return nil, &wechat.QuotaLimitError{Endpoint: endpoint.Name}
+	}
+	return f.delegate.Call(ctx, endpoint, payload)
+}
+
 func (f *orderedPublishedClient) Call(_ context.Context, endpoint wechat.ContentEndpoint, payload interface{}) (*wechat.RawAPIResponse, error) {
 	request, _ := json.Marshal(payload)
 	body := []byte(`{"errcode":0,"errmsg":"ok"}`)
@@ -146,6 +158,47 @@ func TestRefreshPublishedDoesNotDependOnDraftAPI(t *testing.T) {
 	published, err := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'freepublish'`)
 	if err != nil || published != 1 {
 		t.Fatalf("official published page not persisted: published=%d err=%v", published, err)
+	}
+	state, err := store.GetContentState(context.Background(), "freepublish")
+	if err != nil || state == nil || state.LastRecentSuccessAt == 0 || state.LastSuccessAt != 0 {
+		t.Fatalf("latest-page heartbeat must be independent from history cursor: state=%+v err=%v", state, err)
+	}
+}
+
+func TestFullContentRunPrioritizesPublishedPageWhenOnlyOneCallRemains(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client := &fakeContentClient{}
+	collector := &ContentCollector{Client: client, Store: store, MaxCalls: 1}
+	if _, err := collector.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.calls) != 1 || client.calls[0] != "freepublish_batchget" {
+		t.Fatalf("published discovery must not be displaced by draft: calls=%v", client.calls)
+	}
+}
+
+func TestFullContentRunContinuesPublishedDiscoveryWhenDraftQuotaFails(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	client := &draftQuotaContentClient{}
+	collector := &ContentCollector{Client: client, Store: store, MaxCalls: 5}
+	result, err := collector.Run(context.Background())
+	if err == nil {
+		t.Fatal("draft quota exhaustion should remain visible")
+	}
+	if result.Succeeded == 0 || !containsString(client.delegate.calls, "freepublish_batchget") {
+		t.Fatalf("draft failure blocked published collection: result=%+v calls=%v", result, client.delegate.calls)
+	}
+	published, queryErr := store.QueryInt64(context.Background(), `SELECT COUNT(*) FROM official_content_articles WHERE source = 'freepublish'`)
+	if queryErr != nil || published != 1 {
+		t.Fatalf("published page not persisted after draft failure: published=%d err=%v", published, queryErr)
 	}
 }
 

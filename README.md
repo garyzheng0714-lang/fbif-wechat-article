@@ -1,13 +1,21 @@
-# fbif-wechat-article
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="fbif-wechat-article：只走公众号官方 API 归档已发布文章与阅读、分享、在看等指标，原始响应先按字节落 SQLite">
+</p>
 
-![类型：微信工具](https://img.shields.io/badge/%E7%B1%BB%E5%9E%8B-%E5%BE%AE%E4%BF%A1%E5%B7%A5%E5%85%B7-2f6fdd)
-![语言：Go](https://img.shields.io/badge/%E8%AF%AD%E8%A8%80-Go-00ADD8)
-![状态：维护中](https://img.shields.io/badge/%E7%8A%B6%E6%80%81-%E7%BB%B4%E6%8A%A4%E4%B8%AD-2ea44f)
-![README：中文](https://img.shields.io/badge/README-%E4%B8%AD%E6%96%87-d73a49)
+<p align="center">
+  <img src="https://img.shields.io/badge/%E7%B1%BB%E5%9E%8B-%E5%BE%AE%E4%BF%A1%E5%BD%92%E6%A1%A3%E4%B8%8E%E9%87%87%E9%9B%86-2f6fdd?style=flat-square" alt="微信归档与采集">
+  <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.26">
+  <img src="https://img.shields.io/badge/SQLite-%E6%97%A0%20CGO-003B57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite 无 CGO">
+  <img src="https://img.shields.io/badge/%E6%8E%A5%E5%8F%A3-15%20%E4%B8%AA%E7%8E%B0%E5%BD%B9-16a34a?style=flat-square" alt="15 个现役接口">
+</p>
 
-`fbif-wechat-article` 是一个只使用微信公众号官方 API 的归档与数据采集服务。默认自动归档已发布文章、文章指标和粉丝指标，并可把普通图文送入排版待审流程，或在本地数据完整后批量同步到飞书多维表格。
+# fbif-wechat-article · 公众号文章归档
 
-> **数据口径红线：** `freepublish/batchget.total_count` 是发布对象数，不是公众号历史已发布文章总量。任何“历史全量”结论都必须经过多个官方 API、多表关联、去重及覆盖审计；审计完成并经确认前，飞书 Base 同步保持关闭。详见 [已发布文章真值合同](docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md)。
+**只使用微信公众号官方 API** 的归档与数据采集服务。默认自动归档已发布文章、文章指标和粉丝指标，并可把普通图文送入排版待审流程，或在本地数据完整后批量同步到飞书多维表格。
+
+所有响应先按原始字节写入 SQLite，再生成可查询的指标行——**微信新增字段不需要改表结构就能留存**。
+
+> **数据口径红线：** `freepublish/batchget.total_count` 是发布对象数，**不是**公众号历史已发布文章总量。任何「历史全量」结论都必须经过多个官方 API、多表关联、去重及覆盖审计；审计完成并经确认前，飞书 Base 同步保持关闭。详见 [已发布文章真值合同](docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md)。
 
 ## 仓库定位
 
@@ -22,10 +30,10 @@
 - 采集文章阅读、分享、在看、点赞、评论、收藏、赞赏、阅读完成率、阅读来源，以及粉丝新增、取关、净增和累计数据。
 - 自动内容归档只遍历 `freepublish/batchget` 已发布文章，并逐篇调用 `freepublish/getarticle` 保存详情接口全部字段；草稿最新页只用于读取 `article_type`，素材库不参与历史同步。
 - 所有响应先按原始字节写入 SQLite，再生成可查询的文章指标行；微信新增字段无需改结构即可留存。
-- 每天 `00:05` 在上海时区额度刷新后立即抓昨天及最近 30 天仍会变化的数据，再在保留每日 2% 官方额度后，从新到旧断点回填。
+- 每天 `08:05`（上海时区）抓取昨天及最近 30 天仍会变化的数据，再在每接口保留 `200` 次额度后，从新到旧断点回填。
 - 每天北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟独立轮询官方 `freepublish/batchget`；区间外不轮询新文章，`draft` 接口失败不会阻断已发布轮询。只有被可靠类型信号确认为普通图文的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
 - 已发布文章、文章指标、粉丝指标、评论和同步状态先完整落 SQLite；Base 同步显式开启后再批量增量写入。
-- 官方 API 采集器启动后自动执行一次，此后每天 `00:05` 再次执行；旧直连飞书 scheduler 已停用。
+- 官方 API 采集器在 `08:05` 后启动会自动补跑一次，此后每天 `08:05` 执行；`08:05` 前启动会等待当天窗口，旧直连飞书 scheduler 已停用。
 - 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
 - 媒体 worker 可后台补齐封面图链接和正文图片链接。
 - 图片可优先转存到阿里云 OSS；未配置 OSS 时回退到本地 `/media/` 静态目录。
@@ -142,19 +150,25 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 
 - `ENABLE_AUTO_LAYOUT=1`
 - `LAYOUT_OFFICIAL_SYNC_URL`，排版服务的 `/api/publish/official-sync` 完整地址
-- `LAYOUT_SYNC_TOKEN`，排版服务 `PUBLISH_SYNC_SERVICE_TOKEN` 的同值，随请求发在
-  `X-Publish-Sync-Token` 头上。取代 `LAYOUT_ADMIN_PASSWORD`：排版服务 2026-08-04
-  把密码鉴权换成会话角色后，旧的 `X-Admin-Password` 已无对端支持
+- `PUBLISH_SYNC_SERVICE_TOKEN`，仅用于排版服务提交任务和紧凑状态读取的服务令牌
 
-> 投递载荷**只有文章链接加类型证据**，不含正文、标题、作者与封面——排版服务只接收
-> 链接并自己抓原文，喂二手 HTML 会绕开它按账号规则包取参数的解析路径。
+> 投递载荷**只有文章链接加类型证据**，不含正文、标题、作者与封面——排版服务两个
+> 发布入口只接收链接并自己抓原文（其侧红线 33），带正文字段会被 400 拒收。
 - `LAYOUT_SOURCE_NAME`，默认 `FBIF食品饮料创新`
 - `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`，默认 `15`；只在北京时间 `08:30` 至 `18:30`（含首尾）生效
 - `AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN`，默认 `20`
 
-公众号群发结果回调（默认关闭）：
+日报与停摆告警：
 
-- 仅配置 `WECHAT_CALLBACK_TOKEN` 后才启用 `/api/wechat/publish-callback`；安全模式再配置 `WECHAT_CALLBACK_AES_KEY`，`WECHAT_CALLBACK_APP_ID` 不填时沿用 `WECHAT_APPID`
+- 报告通道二选一：优先使用 `OFFICIAL_FEISHU_WEBHOOK_URL`（飞书自定义机器人 HTTPS 地址）与可选的 `OFFICIAL_FEISHU_WEBHOOK_SECRET`；未配置 webhook 时，使用 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`OFFICIAL_FEISHU_CHAT_ID` 由应用机器人发到指定群
+- `ANALYTICS_DEFERRED_RETRY_MINUTES`，官方返回 `is_delay` 后的重试间隔，默认 `30`
+- `ANALYTICS_DEFERRED_MAX_RETRIES`，延迟窗口有界重试次数，默认 `3`；耗尽后告警，不推进覆盖游标
+- `GET /api/wechat/official/monitoring` 是紧凑监控入口，只接受运维 `API_KEY` 或最小权限 `PUBLISH_SYNC_SERVICE_TOKEN`；服务令牌不能访问 status、coverage 或任何写接口。仓库内 `External Sync Watchdog` 每 15 分钟经 SSH 隧道联合探测 112、feed 与排版工具，并对持续故障/恢复去重通知
+
+公众号群发结果回调（兼容代码保留，本方案不启用）：
+
+- 当前自动同步依赖 `freepublish` 最新页轮询，不配置 `WECHAT_CALLBACK_TOKEN`，也不改动公众号后台“服务器配置”
+- 兼容能力仅在未来另行批准并配置 `WECHAT_CALLBACK_TOKEN` 后才启用 `/api/wechat/publish-callback`；安全模式再配置 `WECHAT_CALLBACK_AES_KEY`，`WECHAT_CALLBACK_APP_ID` 不填时沿用 `WECHAT_APPID`
 - 该回调用于补充 `freepublish` 无法覆盖的群发结果事件；启用公众号统一“服务器配置”前，必须先迁移并验证现有自动回复、菜单及其他回调，禁止直接覆盖线上配置
 
 常用可选项：
@@ -162,9 +176,9 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 - `SERVER_PORT`，默认 `3002`
 - `GO_MEMORY_LIMIT_MB`，默认 `512`
 - `FEISHU_RECORD_BATCH_SIZE`
-- `WECHAT_DAILY_QUOTA_LIMIT`
-- `WECHAT_DAILY_QUOTA_RESERVE_PERCENT`，默认 `2`
-- `WECHAT_DAILY_QUOTA_RESERVE`，旧版绝对值兼容项；百分比配置优先
+- `WECHAT_ENDPOINT_DAILY_QUOTA_LIMIT`，每个官方接口各自的日上限，默认且最高 `1000`；旧名 `WECHAT_DAILY_QUOTA_LIMIT` 仅兼容
+- `WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE`，每接口默认保留 `200`，因此默认可用预算为 `800`；也可用 `WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE_PERCENT` 覆盖
+- `WECHAT_QUOTA_FILE`，按接口持久化预算计数的文件；写入失败会回滚本次内存预占并 fail closed
 - `WECHAT_PUBLISHED_PAGE_SIZE`
 - `WECHAT_PUBLISHED_RECENT_PAGES`
 - `WECHAT_PUBLISHED_BACKFILL_GROW_PAGES`
@@ -208,6 +222,7 @@ GOOS=linux GOARCH=amd64 go build -o wechat-sync .
 | `POST` | `/api/feishu/official-sync` | 仅在历史覆盖审计已通过并经人工确认后，批量增量写入 Base。 | `API_KEY` |
 | `GET` | `/api/feishu/cursor` | 查看同步进度 cursor。 | `API_KEY` |
 | `GET` | `/api/wechat/official/status` | 查看 15 个现役接口、6 个下线接口、回填游标和存储统计。 | `API_KEY` |
+| `GET` | `/api/wechat/official/monitoring` | 查看端点新鲜度、`freepublish` 最新页心跳、延迟窗口、自动排版 outbox 与日报配置。 | `API_KEY` 或 `PUBLISH_SYNC_SERVICE_TOKEN` |
 | `GET` | `/api/wechat/official/coverage` | 查看多接口文章身份并集、关联缺口、回填覆盖和 Base 门禁状态。 | `API_KEY` |
 | `POST` | `/api/wechat/official/coverage` | 仅在 `eligibleForUserApproval=true` 后，携带合同版本、确认短语和确认人完成显式确认。 | `API_KEY` |
 | `DELETE` | `/api/wechat/official/coverage` | 撤销历史覆盖确认并立即关闭 Base 门禁。 | `API_KEY` |
@@ -227,7 +242,9 @@ X-API-Key: <token>
 
 ### 官方 API 采集
 
-- 服务启动后自动采集一次，此后每天北京时间 `00:05` 执行。
+- 服务若在北京时间 `08:05` 之后启动会自动采集一次；`08:05` 之前启动只等待当日 `08:05`，不会提前请求 D-1 阅读/分享数据。此后每天 `08:05` 执行并发送日报；延迟窗口按有界策略独立重试。
+- 日报按接口列出当前窗口、deferred、缺口、独立配额余量，并给出基于剩余窗口、单轮上限和每接口可用预算的保守预计完成日期；存在延迟或接口错误时明确写“暂不可估算”。
+- `08:30`–`18:30` 的自动排版轮询独立于完整历史采集启动；它先刷新 `freepublish` 最新页，再处理 outbox，草稿接口失败或历史回填缓慢不能阻断已发布文章发现。
 - `ready` 只表示采集服务与当前接口可运行，绝不表示历史文章全量已核验；历史口径只看 `historicalCoverage.verified`。
 - `getarticletotaldetail` 会重复刷新最近 30 个发表日；其他接口按官方最大跨度拆分并断点回填。
 - 正文、身份与指标分表保存：`official_content_articles` 保存发布正文；`official_article_publications` 用 `msgid=msg_data_id_index` 保存文章身份；`official_article_metric_facts` 关联阅读、分享、阅读后关注等文章事实；`official_follower_metric_facts` 保存账号新增、取关、净增和累计粉丝。`official_article_catalog` 通过官方 `content_url` 关联正文，`official_article_latest_performance` 提供每篇文章最新累计表现。
@@ -277,6 +294,7 @@ X-API-Key: <token>
 
 - 使用 systemd 或类似进程管理器托管编译后的二进制。
 - 工作目录保留二进制、`.env`、`.sync-cursor.json` 和可选 `media/`。
+- GitHub Actions 部署以 `APP_ENV_B64` 为基础环境真值，优先于服务器旧 `.env`；日报机器人可由独立 Secrets `OFFICIAL_FEISHU_WEBHOOK_URL` / `OFFICIAL_FEISHU_WEBHOOK_SECRET` 覆盖，无需搬运整份旧应用凭证。发布前校验核心键，健康检查失败会恢复上一版二进制、环境文件和 systemd 单元。
 - 不要把一次性迁移或重型脚本放进常驻同步服务的启动流程。
 
 ## 注意事项

@@ -37,7 +37,7 @@ type URLSubmitter interface {
 // callbackClassifierVersion 群发回调侧的分类器标识：按文章页 item_show_type 判定
 // 普通图文/小绿书（见 classifier.go）。与 freepublish article_type 是两条独立证据
 // 链路，版本号分开，便于排版服务侧追溯是哪一版判定放行的。
-const callbackClassifierVersion = "callback-page-itemshowtype-v1"
+const callbackClassifierVersion = "wechat-official-event-v1"
 
 type Config struct {
 	Token          string

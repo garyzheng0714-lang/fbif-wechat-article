@@ -32,6 +32,20 @@ func (f *fakeLayoutAPI) SubmitOfficial(_ context.Context, article Article) (Rece
 	return Receipt{JobID: int64(100 + len(f.articles)), Stage: "rendering"}, nil
 }
 
+func TestNewFromEnvRequiresHTTPSOutsideLoopback(t *testing.T) {
+	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
+	t.Setenv("PUBLISH_SYNC_SERVICE_TOKEN", "test-service-token")
+	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "http://layout.example.com/api/publish/official-sync")
+	if _, err := NewFromEnv(nil); err == nil {
+		t.Fatal("remote plain HTTP endpoint must be rejected")
+	}
+
+	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "http://127.0.0.1:9001/api/publish/official-sync")
+	if dispatcher, err := NewFromEnv(nil); err != nil || dispatcher == nil {
+		t.Fatalf("local loopback endpoint should remain available for tests: dispatcher=%v err=%v", dispatcher, err)
+	}
+}
+
 func savePublishedArticle(t *testing.T, store *archive.Store, articleID, title, articleURL string, now time.Time) {
 	t.Helper()
 	body, err := json.Marshal(map[string]interface{}{
@@ -121,7 +135,7 @@ func TestDispatcherBaselinesExistingAndDeliversOnlyNewOfficialContent(t *testing
 		t.Fatalf("新官方文章应只投递一次：%+v calls=%d", second, len(fake.articles))
 	}
 	got := fake.articles[0]
-	// 只投链接加类型证据：正文/标题/作者/封面由排版服务从原文现抓（红线）。
+	// 只投链接加类型证据：正文/标题/作者/封面由排版服务从原文现抓（其侧红线 33）。
 	if got.URL != newURL || got.ContentKind != layoutContentKind ||
 		got.Classification != layoutClassification || got.ClassifierVersion != layoutClassifierVersion {
 		t.Fatalf("投递载荷不符：%+v", got)
@@ -265,13 +279,13 @@ func TestDispatcherSkipsNewspicWhenOnlyStableIdentityIsTitleAndIndex(t *testing.
 	}
 }
 
-// TestHTTPAPISendsSyncTokenAndURLOnlyBody official-sync 投递必须带排版服务认得的
-// X-Publish-Sync-Token，且载荷里**不得出现任何正文字段**——排版服务会 400 拒收，
-// 而且二手正文正是任务 #72 排版崩坏的成因。
-func TestHTTPAPISendsSyncTokenAndURLOnlyBody(t *testing.T) {
+// TestHTTPAPISendsServiceTokenAndURLOnlyBody official-sync 载荷必须只有链接加
+// 类型证据，**不得出现任何正文字段**——排版服务会 400 拒收，而二手正文正是任务
+// #72 排版崩坏的成因。
+func TestHTTPAPISendsServiceTokenAndURLOnlyBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Publish-Sync-Token") != "secret" {
-			t.Errorf("publish sync token header missing")
+		if r.Header.Get("X-Publish-Sync-Token") != "service-token" {
+			t.Errorf("service token header missing")
 		}
 		var raw map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -282,19 +296,18 @@ func TestHTTPAPISendsSyncTokenAndURLOnlyBody(t *testing.T) {
 				t.Errorf("载荷不得包含内容字段 %q: %#v", banned, raw)
 			}
 		}
-		if raw["url"] != "https://mp.weixin.qq.com/s/x" || raw["classification"] != "ordinary_confirmed" {
-			t.Errorf("载荷不符: %#v", raw)
+		if raw["url"] != "https://mp.weixin.qq.com/s/x" || raw["content_kind"] != "article" ||
+			raw["classification"] != "ordinary_confirmed" || raw["classifier_version"] == "" {
+			t.Errorf("载荷或证据不符: %#v", raw)
 		}
 		w.WriteHeader(http.StatusCreated)
 		fmt.Fprint(w, `{"job":{"id":88,"stage":"rendering"},"existing":false}`)
 	}))
 	defer server.Close()
-	client := &HTTPAPI{Endpoint: server.URL, SyncToken: "secret", Client: server.Client()}
+	client := &HTTPAPI{Endpoint: server.URL, ServiceToken: "service-token", Client: server.Client()}
 	receipt, err := client.SubmitOfficial(context.Background(), Article{
-		URL:               "https://mp.weixin.qq.com/s/x",
-		ContentKind:       layoutContentKind,
-		Classification:    layoutClassification,
-		ClassifierVersion: layoutClassifierVersion,
+		URL: "https://mp.weixin.qq.com/s/x", ContentKind: layoutContentKind,
+		Classification: layoutClassification, ClassifierVersion: layoutClassifierVersion,
 	})
 	if err != nil || receipt.JobID != 88 || receipt.Stage != "rendering" || receipt.Existing {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
@@ -306,8 +319,8 @@ func TestHTTPAPISubmitURLUsesSiteSync(t *testing.T) {
 		if r.URL.Path != "/api/publish/site-sync" {
 			t.Errorf("path=%q", r.URL.Path)
 		}
-		if r.Header.Get("X-Publish-Sync-Token") != "secret" {
-			t.Errorf("publish sync token header missing")
+		if r.Header.Get("X-Publish-Sync-Token") != "service-token" {
+			t.Errorf("service token header missing")
 		}
 		var raw map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -326,18 +339,53 @@ func TestHTTPAPISubmitURLUsesSiteSync(t *testing.T) {
 	}))
 	defer server.Close()
 	client := &HTTPAPI{
-		Endpoint:  server.URL + "/api/publish/official-sync",
-		SyncToken: "secret",
-		Client:    server.Client(),
+		Endpoint:     server.URL + "/api/publish/official-sync",
+		ServiceToken: "service-token",
+		Client:       server.Client(),
 	}
 	receipt, err := client.SubmitURL(context.Background(), Article{
-		URL:               "https://mp.weixin.qq.com/s/url-import",
-		ContentKind:       layoutContentKind,
-		Classification:    layoutClassification,
-		ClassifierVersion: layoutClassifierVersion,
+		URL: "https://mp.weixin.qq.com/s/url-import", ContentKind: layoutContentKind,
+		Classification: layoutClassification, ClassifierVersion: layoutClassifierVersion,
 	})
 	if err != nil || receipt.JobID != 89 || receipt.Stage != "enriching" || !receipt.Existing {
 		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+}
+
+func TestHTTPAPIDoesNotForwardServiceTokenAcrossRedirects(t *testing.T) {
+	targetCalls := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls++
+		if r.Header.Get("X-Publish-Sync-Token") != "" {
+			t.Fatalf("service token leaked to redirect target")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	client := &HTTPAPI{Endpoint: redirect.URL, ServiceToken: "service-token", Client: redirect.Client()}
+	if _, err := client.SubmitOfficial(context.Background(), Article{URL: "https://mp.weixin.qq.com/s/x"}); err == nil {
+		t.Fatal("redirect must remain an explicit HTTP error")
+	}
+	if targetCalls != 0 {
+		t.Fatalf("redirect target calls=%d want 0", targetCalls)
+	}
+}
+
+func TestHTTPAPIRejectsAmbiguousEndpoint(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://user@example.com/api/publish/official-sync",
+		"https://example.com/api/publish/official-sync?next=https://attacker.example",
+		"http://example.com/api/publish/official-sync",
+	} {
+		client := &HTTPAPI{Endpoint: endpoint, ServiceToken: "service-token"}
+		if _, err := client.SubmitOfficial(context.Background(), Article{}); err == nil {
+			t.Fatalf("SubmitOfficial endpoint %q must fail", endpoint)
+		}
 	}
 }
 
@@ -356,54 +404,5 @@ func TestCanonicalSourceKeyMatchesLayoutIdentity(t *testing.T) {
 	short, err := CanonicalSourceKey("https://mp.weixin.qq.com/s/AbCd?scene=1#rd")
 	if err != nil || short != "site:https://mp.weixin.qq.com/s/AbCd" {
 		t.Fatalf("短链归一错误：%q err=%v", short, err)
-	}
-}
-
-// TestNewFromEnvFallsBackToLegacyToken 只配了旧变量的服务器必须照常启动。
-//
-// 调用方用 log.Fatalf 起服务：如果 NewFromEnv 因为缺 LAYOUT_SYNC_TOKEN 报错，
-// 归档采集、监控和回调会跟着一起退出。为了修一条本来就断着的投递链路赔上整个
-// 服务，不划算——回退用旧值继续跑（投递仍 401，与现状一致），日志提示换配置。
-func TestNewFromEnvFallsBackToLegacyToken(t *testing.T) {
-	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
-	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "https://layout.example.com/api/publish/official-sync")
-	t.Setenv("LAYOUT_SYNC_TOKEN", "")
-	t.Setenv("LAYOUT_ADMIN_PASSWORD", "legacy-value")
-
-	dispatcher, err := NewFromEnv(nil)
-	if err != nil {
-		t.Fatalf("只配旧变量时不得报错（会让整个服务 Fatal 退出）: %v", err)
-	}
-	client, ok := dispatcher.Client.(*HTTPAPI)
-	if !ok || client.SyncToken != "legacy-value" {
-		t.Fatalf("应回退使用旧值: %+v", dispatcher.Client)
-	}
-}
-
-// TestNewFromEnvPrefersSyncToken 新旧都在时以新变量为准。
-func TestNewFromEnvPrefersSyncToken(t *testing.T) {
-	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
-	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "https://layout.example.com/api/publish/official-sync")
-	t.Setenv("LAYOUT_SYNC_TOKEN", "new-token")
-	t.Setenv("LAYOUT_ADMIN_PASSWORD", "legacy-value")
-
-	dispatcher, err := NewFromEnv(nil)
-	if err != nil {
-		t.Fatalf("NewFromEnv: %v", err)
-	}
-	if client, ok := dispatcher.Client.(*HTTPAPI); !ok || client.SyncToken != "new-token" {
-		t.Fatalf("应优先使用 LAYOUT_SYNC_TOKEN: %+v", dispatcher.Client)
-	}
-}
-
-// TestNewFromEnvFailsWhenBothMissing 两个都没有才报错（真·缺配置）。
-func TestNewFromEnvFailsWhenBothMissing(t *testing.T) {
-	t.Setenv("ENABLE_AUTO_LAYOUT", "1")
-	t.Setenv("LAYOUT_OFFICIAL_SYNC_URL", "https://layout.example.com/api/publish/official-sync")
-	t.Setenv("LAYOUT_SYNC_TOKEN", "")
-	t.Setenv("LAYOUT_ADMIN_PASSWORD", "")
-
-	if _, err := NewFromEnv(nil); err == nil {
-		t.Fatal("两个 token 变量都缺失时必须报错")
 	}
 }

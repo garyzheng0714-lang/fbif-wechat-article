@@ -41,12 +41,19 @@ func (r *Runtime) MonitoringStatus(ctx context.Context, now time.Time) (*Monitor
 		now = time.Now()
 	}
 	status := &MonitoringStatus{CheckedAt: now.UnixMilli()}
-	analyticsStatus, err := r.Analytics.Status(ctx)
+	// 高频监控只需要端点状态，不能走 Collector.Status：它还会调用 Store.Stats
+	// 对 official_api_rows 全表 COUNT。该表 2026-09 已超 70 万行，生产单次 COUNT
+	// 超过 14 秒，撑爆处理函数的 5 秒超时，探针从 2026-09-11 起持续 official:http_500。
+	stateStore := r.Analytics.Store
+	if stateStore == nil {
+		stateStore = r.Store
+	}
+	states, err := stateStore.ListStates(ctx)
 	if err != nil {
 		return nil, err
 	}
-	byEndpoint := make(map[string]archive.EndpointState, len(analyticsStatus.States))
-	for _, state := range analyticsStatus.States {
+	byEndpoint := make(map[string]archive.EndpointState, len(states))
+	for _, state := range states {
 		byEndpoint[state.Endpoint] = state
 	}
 	for _, endpoint := range r.Analytics.activeEndpoints() {

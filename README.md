@@ -111,11 +111,13 @@ go run .
 go build -o wechat-sync .
 ```
 
-Linux amd64 构建示例：
+部署到生产（资讯机，FBIF-内部工具服务器 101.133.154.40）：
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -o wechat-sync .
+scripts/deploy-cloud-assistant.sh
 ```
+
+它在本地交叉编译 Linux amd64，经阿里云云助手分片上传、校验 SHA-256、替换重启并做健康冒烟，失败自动回滚。前提是本机 `aliyun` CLI 已用 OAuth 登录（过期时 `aliyun configure --profile new-account --mode OAuth`）。不需要 SSH、公网 IP 白名单或 VPN。
 
 ## 配置
 
@@ -294,7 +296,8 @@ X-API-Key: <token>
 
 - 使用 systemd 或类似进程管理器托管编译后的二进制。
 - 工作目录保留二进制、`.env`、`.sync-cursor.json` 和可选 `media/`。
-- GitHub Actions 部署以 `APP_ENV_B64` 为基础环境真值，优先于服务器旧 `.env`；日报机器人可由独立 Secrets `OFFICIAL_FEISHU_WEBHOOK_URL` / `OFFICIAL_FEISHU_WEBHOOK_SECRET` 覆盖，无需搬运整份旧应用凭证。发布前校验核心键，健康检查失败会恢复上一版二进制、环境文件和 systemd 单元。
+- 2026-09-15 起服务运行在资讯机（FBIF-内部工具服务器 101.133.154.40），与 feed.foodtalks.cn 同机；工作目录 `/opt/fbif-wechat-article-dashboard/bin`，归档库 `/root/mp-archive/mp-archive.db`。此前的 GitHub Actions SSH 部署已移除：资讯机 22 端口只对少数运维 IP 开放，统一改走 `scripts/deploy-cloud-assistant.sh`。环境文件 `.env` 由服务器持有，不再经 Secrets 下发。
+- 监控探针（FoodTalks_Feed 的 `monitoring/watchdog.py`）与本服务同机，直接探 `127.0.0.1:3002`，不再经 Caddy 跨机反代。
 - 不要把一次性迁移或重型脚本放进常驻同步服务的启动流程。
 
 ## 注意事项

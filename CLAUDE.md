@@ -6,7 +6,7 @@ FBIF 内容链路由**三个互相独立的系统**组成，各有各的代码�
 
 | 系统 | 干什么 | 时效 | 数据库 | 域名 |
 | --- | --- | --- | --- | --- |
-| **本项目**（fbif-wechat-article） | **归档监控**：微信公众号官方 API 归档、阅读/粉丝指标 | **T+1**，每天 09:00 CST 一次 | SQLite | `112.124.103.65:3002` |
+| **本项目**（fbif-wechat-article） | **归档监控**：微信公众号官方 API 归档、阅读/粉丝指标 | **T+1**，每天 09:00 CST 一次 | SQLite | 资讯机本机 `127.0.0.1:3002`（与 feed.foodtalks.cn 同机，2026-09-15 迁入） |
 | FoodTalks_Feed | **实时监控**：RSS/供应商资讯采集、分类、判断、筛选 | **实时**（持续轮询） | PostgreSQL（它自己的） | `feed.foodtalks.cn` |
 | FBIF公众号排版 | **加工**：排版、风险检查、飞书审核、分发到公众号/FoodTalks | 收到即处理 | JSON 文件（它自己的） | `fbifmp-layout.foodtalks.cn` |
 

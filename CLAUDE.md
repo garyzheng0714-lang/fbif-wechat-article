@@ -6,19 +6,21 @@ FBIF 内容链路由**三个互相独立的系统**组成，各有各的代码�
 
 | 系统 | 干什么 | 时效 | 数据库 | 域名 |
 | --- | --- | --- | --- | --- |
-| **本项目**（fbif-wechat-article） | **归档监控**：微信公众号官方 API 归档、阅读/粉丝指标 | **T+1**，每天 09:00 CST 一次 | SQLite | 资讯机本机 `127.0.0.1:3002`（与 feed.foodtalks.cn 同机，2026-09-15 迁入） |
+| **本项目**（fbif-wechat-article） | **归档监控**：微信公众号官方 API 归档、阅读/粉丝指标 | 指标 **T+1**，每天 08:05；发布发现 08:30–18:30 每 15 分钟 | SQLite | 资讯机本机 `127.0.0.1:3002`（与 feed.foodtalks.cn 同机，2026-09-15 迁入） |
 | FoodTalks_Feed | **实时监控**：RSS/供应商资讯采集、分类、判断、筛选 | **实时**（持续轮询） | PostgreSQL（它自己的） | `feed.foodtalks.cn` |
 | FBIF公众号排版 | **加工**：排版、风险检查、飞书审核、分发到公众号/FoodTalks | 收到即处理 | JSON 文件（它自己的） | `fbifmp-layout.foodtalks.cn` |
 
 **本项目的定位一句话：只做监控。** 用官方 API 归档自家公众号的文章与数据，并把普通图文的「链接 + 分类证据」推给排版工具，到此为止。
 
-### 本项目是 T+1，不需要高频轮询
+### 两种调度节奏不能混淆
 
-微信官方 API **只拿得到上一天发布的文章**，所以每天同步一次昨天的量就够（`sync/scheduler.go` 的 daily cron，09:00 CST）。**不要改成高频轮询**——拿不到更新的数据，只会烧掉每日额度。
+阅读、分享、粉丝等统计指标是 **T+1**：现行 `analytics/runtime.go` 每天 08:05（Asia/Shanghai）执行完整 D-1 采集，不需要高频刷新统计窗口。
 
-当天要看到公众号新文，靠的是 `FoodTalks_Feed` 经今天看啥接口拿的 RSS，那条线才是实时的。两条线时效不同，别混为一谈。
+当天发布发现是另一条节奏：启用自动排版时，`analytics/runtime.go` 在 08:30–18:30 按 `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`（默认 15）调用 `PollLayout`；它先通过 `Content.RefreshPublished` 请求微信官方 `freepublish/batchget` 最新页，再处理持久化 outbox。该轮询会消耗 `freepublish/batchget` 的独立接口额度，不是只扫本地库。
 
-`AUTO_LAYOUT_POLL_INTERVAL_MINUTES=15` 是**投递轮询**——扫本地库找待投递文章，不调微信 API、不耗额度，与采集频率无关。
+`sync/scheduler.go` 中 09:00 的旧 scheduler 当前没有从 `main.go` 启动，不能再用它推断运行时调度。现行调度真值是 `main.go` 启动的 `analytics.Runtime`。
+
+`FoodTalks_Feed` 的 RSS 实时监控仍是独立系统；它与本项目的官方发布轮询可以先后发现同一文章，排版侧依靠 `source_key` 幂等去重。
 
 两个监控端 → `POST /api/publish/site-sync` → 排版工具。**载荷只有链接**，不含正文、标题、来源、作者、封面（排版侧对这五个字段一律 400）。本项目已于提交 `5f036db` 收敛到位，`autolayout.Article` 只有 url 加三个类型证据字段，**不得回退**。
 

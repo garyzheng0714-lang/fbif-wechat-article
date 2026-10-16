@@ -165,7 +165,7 @@ scripts/deploy-cloud-assistant.sh
 - 报告通道二选一：优先使用 `OFFICIAL_FEISHU_WEBHOOK_URL`（飞书自定义机器人 HTTPS 地址）与可选的 `OFFICIAL_FEISHU_WEBHOOK_SECRET`；未配置 webhook 时，使用 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`OFFICIAL_FEISHU_CHAT_ID` 由应用机器人发到指定群
 - `ANALYTICS_DEFERRED_RETRY_MINUTES`，官方返回 `is_delay` 后的重试间隔，默认 `30`
 - `ANALYTICS_DEFERRED_MAX_RETRIES`，延迟窗口有界重试次数，默认 `3`；耗尽后告警，不推进覆盖游标
-- `GET /api/wechat/official/monitoring` 是紧凑监控入口，只接受运维 `API_KEY` 或最小权限 `PUBLISH_SYNC_SERVICE_TOKEN`；服务令牌不能访问 status、coverage 或任何写接口。仓库内 `External Sync Watchdog` 每 15 分钟经 SSH 隧道联合探测 112、feed 与排版工具，并对持续故障/恢复去重通知
+- `GET /api/wechat/official/monitoring` 是紧凑监控入口，只接受运维 `API_KEY` 或最小权限 `PUBLISH_SYNC_SERVICE_TOKEN`；服务令牌不能访问 status、coverage 或任何写接口。探测这个入口的看门狗归 FoodTalks_Feed 的 `monitoring/watchdog.py`（见下文部署建议），本仓库不再自带看门狗
 
 公众号群发结果回调（兼容代码保留，本方案不启用）：
 
@@ -187,6 +187,7 @@ scripts/deploy-cloud-assistant.sh
 - `WECHAT_SYNC_COVER_INLINE`
 - `WECHAT_SYNC_BODY_IMAGES_INLINE`
 - `PUBLIC_MEDIA_DIR`
+- `PUBLIC_BASE_URL`，本地转存图片的对外链接前缀；未配置 OSS 时必填
 
 媒体 worker：
 
@@ -282,7 +283,7 @@ X-API-Key: <token>
 
 - 默认启用。
 - 补齐 `封面图链接` 和 `正文图片链接`。
-- 优先写入 OSS；未配置 OSS 时写入本地 `PUBLIC_MEDIA_DIR` 或 `./media`。
+- 优先写入 OSS；未配置 OSS 时写入本地 `PUBLIC_MEDIA_DIR` 或 `./media`，链接前缀取 `PUBLIC_BASE_URL`。两者都没配置时不转存，直接返回错误。
 - 不阻塞主同步。
 
 ### 历史素材 worker（旧版可选能力）

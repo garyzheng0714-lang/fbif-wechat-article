@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -26,6 +27,8 @@ var (
 	articleImgTagRe    = regexp.MustCompile(`(?is)<img\b[^>]*?(?:data-src|src)=["']([^"']+)["'][^>]*>`)
 	imageMirrorCache   = make(map[string]string)
 	imageMirrorCacheMu sync.Mutex
+
+	errImageMirrorNotConfigured = errors.New("image mirror not configured: set OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET and OSS_BUCKET, or PUBLIC_BASE_URL")
 )
 
 func ExtractArticleImageURLs(htmlContent string) []string {
@@ -89,6 +92,9 @@ func MirrorRemoteImage(imageURL string) (string, error) {
 	}
 	imageMirrorCacheMu.Unlock()
 
+	if !ossEnabled() && publicBaseURL() == "" {
+		return "", errImageMirrorNotConfigured
+	}
 	if strings.HasPrefix(imageURL, publicBaseURL()+"/media/") {
 		return imageURL, nil
 	}
@@ -287,10 +293,7 @@ func normalizeContentType(contentType string, data []byte, objectKey string) str
 }
 
 func publicBaseURL() string {
-	if v := strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")); v != "" {
-		return strings.TrimRight(v, "/")
-	}
-	return "http://112.124.103.65:3002"
+	return strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/")
 }
 
 func publicMediaRoot() string {

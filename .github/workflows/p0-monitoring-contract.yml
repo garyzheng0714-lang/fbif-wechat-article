@@ -31,6 +31,3 @@ jobs:
 
       - name: Race-test official monitoring contracts
         run: go test -race ./analytics ./archive ./autolayout ./wechat
-
-      - name: Test independent external watchdog
-        run: python3 -m unittest tools/test_external_watchdog.py

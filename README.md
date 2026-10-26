@@ -297,7 +297,7 @@ X-API-Key: <token>
 
 - 使用 systemd 或类似进程管理器托管编译后的二进制。
 - 工作目录保留二进制、`.env`、`.sync-cursor.json` 和可选 `media/`。
-- 2026-09-15 起服务运行在资讯机（FBIF-内部工具服务器 101.133.154.40），与 feed.foodtalks.cn 同机；工作目录 `/opt/fbif-wechat-article-dashboard/bin`，归档库 `/root/mp-archive/mp-archive.db`。此前的 GitHub Actions SSH 部署已移除：资讯机 22 端口只对少数运维 IP 开放，统一改走 `scripts/deploy-cloud-assistant.sh`。环境文件 `.env` 由服务器持有，不再经 Secrets 下发。
+- 2026-09-15 起服务运行在资讯机（FBIF-内部工具服务器 101.133.154.40），与 feed.foodtalks.cn 同机；工作目录 `/opt/fbif-wechat-article-dashboard/bin`，归档库 `/root/mp-archive/mp-archive.db`。此前的 GitHub Actions SSH 部署已移除：资讯机 22 端口只对少数运维 IP 开放，统一改走 `scripts/deploy-cloud-assistant.sh`。环境文件 `.env` 由服务器持有，不再经 Secrets 下发。`WECHAT_SECRET`、`API_KEY`、`PUBLISH_SYNC_SERVICE_TOKEN` 2026-10-26 起由 FBIF 中台的本机代理写进 `/etc/fbif-hub/env/wechat-sync.env`，systemd drop-in `wechat-sync.service.d/zz-fbif-hub.conf` 把它带进进程环境；程序读 `.env` 时不覆盖环境里已有的值，所以以中台为准，`.env` 里不再写这三项。换值在内部工具服务器上 `hubctl put <编号>`，见 FBIF-One-Api `docs/hub/公共变量和密钥.md`。
 - 监控探针（FoodTalks_Feed 的 `monitoring/watchdog.py`）与本服务同机，直接探 `127.0.0.1:3002`，不再经 Caddy 跨机反代。
 - 不要把一次性迁移或重型脚本放进常驻同步服务的启动流程。
 

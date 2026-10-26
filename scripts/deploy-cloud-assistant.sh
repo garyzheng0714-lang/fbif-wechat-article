@@ -92,7 +92,8 @@ if [ "\$ok" -ne 1 ]; then
   echo "health check failed, rolling back"
   systemctl stop wechat-sync; cp ${APP_DIR}/bin/wechat-sync.prev ${APP_DIR}/bin/wechat-sync; systemctl start wechat-sync; exit 5
 fi
-KEY=\$(grep -E '^API_KEY=' ${APP_DIR}/.env | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+# API_KEY 由 FBIF 中台的本机代理写在这个文件（值不带引号），.env 里已经没有
+KEY=\$(sed -n 's/^API_KEY=//p' /etc/fbif-hub/env/wechat-sync.env | head -1)
 code=\$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H "X-API-Key: \$KEY" http://127.0.0.1:3002/api/wechat/official/monitoring)
 echo "monitoring endpoint HTTP \$code"
 printf '{"release":"%s","commit":"%s","sha256":"%s","deployed_at":"%s"}\n' "${RELEASE}" "${COMMIT}" "${SHA_BIN}" "\$(date -u +%FT%TZ)" > ${APP_DIR}/release.json

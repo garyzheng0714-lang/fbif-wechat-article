@@ -11,7 +11,8 @@ permissions:
 
 concurrency:
   group: p0-monitoring-official-${{ github.ref }}
-  cancel-in-progress: true
+  # 同一个 PR 连推只跑最新一次；main 上每次推送都跑完。
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   monitoring-contract:

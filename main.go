@@ -67,19 +67,6 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	if !ossConfigured() {
-		mediaRoot := os.Getenv("PUBLIC_MEDIA_DIR")
-		if mediaRoot == "" {
-			mediaRoot = "./media"
-		}
-		if err := os.MkdirAll(mediaRoot, 0755); err != nil {
-			log.Fatalf("create media dir: %v", err)
-		}
-		mux.Handle("/media/", http.StripPrefix("/media/", http.FileServer(http.Dir(mediaRoot))))
-		log.Printf("Local media root enabled: %s", mediaRoot)
-	} else {
-		log.Printf("OSS media mode enabled: %s", strings.TrimSpace(os.Getenv("OSS_BUCKET_DOMAIN")))
-	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/feishu/sync", requireAPIKey(syncHandler))
 	mux.HandleFunc("/api/feishu/official-sync", requireAPIKey(officialBaseSyncHandler))
@@ -164,13 +151,6 @@ func configureRuntime() {
 	}
 	debug.SetMemoryLimit(int64(limitMB) * 1024 * 1024)
 	log.Printf("Go memory limit set to %dMB", limitMB)
-}
-
-func ossConfigured() bool {
-	return strings.TrimSpace(os.Getenv("OSS_ACCESS_KEY_ID")) != "" &&
-		strings.TrimSpace(os.Getenv("OSS_ACCESS_KEY_SECRET")) != "" &&
-		strings.TrimSpace(os.Getenv("OSS_BUCKET")) != "" &&
-		strings.TrimSpace(os.Getenv("OSS_BUCKET_DOMAIN")) != ""
 }
 
 func featureEnabled(key string, defaultValue bool) bool {

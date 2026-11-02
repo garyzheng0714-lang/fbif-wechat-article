@@ -285,22 +285,6 @@ func GetExistingRecords(keyField, tableID string) (map[string]string, error) {
 	return records, nil
 }
 
-type SyncRecord struct {
-	UniqueKey string
-	Fields    map[string]interface{}
-}
-
-type SyncResult struct {
-	Created int `json:"created"`
-	Skipped int `json:"skipped,omitempty"`
-	Updated int `json:"updated,omitempty"`
-}
-
-type Record struct {
-	RecordID string
-	Fields   map[string]interface{}
-}
-
 func recordWriteBatchSize() int {
 	raw := strings.TrimSpace(os.Getenv("FEISHU_RECORD_BATCH_SIZE"))
 	if raw == "" {
@@ -314,29 +298,6 @@ func recordWriteBatchSize() int {
 		return 500
 	}
 	return n
-}
-
-func BatchCreateByRecordFields(tableID string, records []map[string]interface{}) error {
-	batchSize := recordWriteBatchSize()
-	created := 0
-	for i := 0; i < len(records); i += batchSize {
-		end := i + batchSize
-		if end > len(records) {
-			end = len(records)
-		}
-		batch := records[i:end]
-		recordWriteMu.Lock()
-		_, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
-			"records": batch,
-		}, tableID)
-		recordWriteMu.Unlock()
-		if err != nil {
-			return fmt.Errorf("batch create (offset %d): %w", i, err)
-		}
-		created += len(batch)
-		log.Printf("[Feishu] Batch created %d records (%d/%d)", len(batch), created, len(records))
-	}
-	return nil
 }
 
 // BatchCreateByRecordFieldsWithIDs creates records and returns their Feishu
@@ -381,60 +342,6 @@ func BatchCreateByRecordFieldsWithIDs(tableID string, records []map[string]inter
 	return recordIDs, nil
 }
 
-func ListRecords(tableID string, fieldNames []string) ([]Record, error) {
-	var records []Record
-	pageToken := ""
-	useFieldNames := len(fieldNames) > 0
-
-	for {
-		params := url.Values{"page_size": {"500"}}
-		if useFieldNames {
-			params.Set("field_names", strings.Join(fieldNames, ","))
-		}
-		if pageToken != "" {
-			params.Set("page_token", pageToken)
-		}
-
-		data, err := feishuRequest("GET", "/records?"+params.Encode(), nil, tableID)
-		if err != nil {
-			if useFieldNames && strings.Contains(err.Error(), "InvalidFieldNames") {
-				log.Printf("[Feishu] ListRecords: field_names not yet valid, falling back to full fields")
-				useFieldNames = false
-				pageToken = ""
-				records = nil
-				continue
-			}
-			return nil, err
-		}
-
-		var result struct {
-			Items []struct {
-				RecordID string                 `json:"record_id"`
-				Fields   map[string]interface{} `json:"fields"`
-			} `json:"items"`
-			HasMore   bool   `json:"has_more"`
-			PageToken string `json:"page_token"`
-		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, fmt.Errorf("parse records: %w", err)
-		}
-
-		for _, item := range result.Items {
-			records = append(records, Record{
-				RecordID: item.RecordID,
-				Fields:   item.Fields,
-			})
-		}
-
-		if !result.HasMore {
-			break
-		}
-		pageToken = result.PageToken
-	}
-
-	return records, nil
-}
-
 func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) error {
 	batchSize := recordWriteBatchSize()
 	updated := 0
@@ -456,127 +363,4 @@ func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) err
 		log.Printf("[Feishu] Batch updated %d records (%d/%d)", len(batch), updated, len(records))
 	}
 	return nil
-}
-
-func FieldString(fields map[string]interface{}, name string) string {
-	v, ok := fields[name]
-	if !ok || v == nil {
-		return ""
-	}
-	switch t := v.(type) {
-	case string:
-		return t
-	case map[string]interface{}:
-		if link, ok := t["link"].(string); ok {
-			return link
-		}
-	case []interface{}:
-		var parts []string
-		for _, el := range t {
-			if m, ok := el.(map[string]interface{}); ok {
-				if s, ok := m["text"].(string); ok {
-					parts = append(parts, s)
-				}
-			}
-		}
-		return strings.Join(parts, "")
-	}
-	return fmt.Sprintf("%v", v)
-}
-
-func FieldInt64(fields map[string]interface{}, name string) int64 {
-	v, ok := fields[name]
-	if !ok || v == nil {
-		return 0
-	}
-	switch t := v.(type) {
-	case float64:
-		return int64(t)
-	case int64:
-		return t
-	case int:
-		return int64(t)
-	case json.Number:
-		n, _ := t.Int64()
-		return n
-	case string:
-		n, _ := strconv.ParseInt(t, 10, 64)
-		return n
-	}
-	return 0
-}
-
-func SyncRecordsInsertOnly(records []SyncRecord, keyField, tableID string) (*SyncResult, error) {
-	if len(records) == 0 {
-		return &SyncResult{}, nil
-	}
-
-	existing, err := GetExistingRecords(keyField, tableID)
-	if err != nil {
-		return nil, err
-	}
-
-	var createList []map[string]interface{}
-	skipped := 0
-
-	for _, r := range records {
-		if _, exists := existing[r.UniqueKey]; exists {
-			skipped++
-		} else {
-			createList = append(createList, map[string]interface{}{"fields": r.Fields})
-		}
-	}
-
-	created := 0
-	if len(createList) > 0 {
-		if err := BatchCreateByRecordFields(tableID, createList); err != nil {
-			return nil, fmt.Errorf("batch create: %w", err)
-		}
-		created = len(createList)
-	}
-
-	return &SyncResult{Created: created, Skipped: skipped}, nil
-}
-
-func SyncRecordsUpsert(records []SyncRecord, keyField, tableID string) (*SyncResult, error) {
-	if len(records) == 0 {
-		return &SyncResult{}, nil
-	}
-
-	existing, err := GetExistingRecords(keyField, tableID)
-	if err != nil {
-		return nil, err
-	}
-
-	var createList []map[string]interface{}
-	var updateList []map[string]interface{}
-
-	for _, r := range records {
-		if recordID, exists := existing[r.UniqueKey]; exists {
-			updateList = append(updateList, map[string]interface{}{
-				"record_id": recordID,
-				"fields":    r.Fields,
-			})
-		} else {
-			createList = append(createList, map[string]interface{}{"fields": r.Fields})
-		}
-	}
-
-	created := 0
-	if len(createList) > 0 {
-		if err := BatchCreateByRecordFields(tableID, createList); err != nil {
-			return nil, fmt.Errorf("batch create: %w", err)
-		}
-		created = len(createList)
-	}
-
-	updated := 0
-	if len(updateList) > 0 {
-		if err := BatchUpdateByRecordID(tableID, updateList); err != nil {
-			return nil, fmt.Errorf("batch update: %w", err)
-		}
-		updated = len(updateList)
-	}
-
-	return &SyncResult{Created: created, Updated: updated}, nil
 }

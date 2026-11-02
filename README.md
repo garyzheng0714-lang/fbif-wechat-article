@@ -25,7 +25,7 @@
 
 ## 功能概览
 
-- 使用微信公众号 `freepublish/batchget` 接口同步已发布文章。
+- 使用微信公众号 `freepublish/batchget` 接口归档已发布文章。
 - 覆盖微信文档中的 21 个数据接口：15 个现役接口每日采集，6 个已下线旧接口保留一次 `47009` 官方响应和替代接口说明。
 - 采集文章阅读、分享、在看、点赞、评论、收藏、赞赏、阅读完成率、阅读来源，以及粉丝新增、取关、净增和累计数据。
 - 自动内容归档只遍历 `freepublish/batchget` 已发布文章，并逐篇调用 `freepublish/getarticle` 保存详情接口全部字段；草稿最新页只用于读取 `article_type`，素材库不参与历史同步。
@@ -33,37 +33,8 @@
 - 每天 `08:05`（上海时区）抓取昨天及最近 30 天仍会变化的数据，再在每接口保留 `200` 次额度后，从新到旧断点回填。
 - 每天北京时间 `08:30` 至 `18:30`（含首尾）每 `15` 分钟独立轮询官方 `freepublish/batchget`；区间外不轮询新文章，`draft` 接口失败不会阻断已发布轮询。只有被可靠类型信号确认为普通图文的新文章才经持久化 outbox 投递给排版服务；小绿书/图片消息 `newspic` 永久跳过，类型不明时 fail closed。
 - 已发布文章、文章指标、粉丝指标、评论和同步状态先完整落 SQLite；Base 同步显式开启后再批量增量写入。
-- 官方 API 采集器在 `08:05` 后启动会自动补跑一次，此后每天 `08:05` 执行；`08:05` 前启动会等待当天窗口，旧直连飞书 scheduler 已停用。
-- 使用 `.sync-cursor.json` 记录扫描进度，支持服务重启后续跑。
-- 媒体 worker 可后台补齐封面图链接和正文图片链接。
-- 图片可优先转存到阿里云 OSS；未配置 OSS 时回退到本地 `/media/` 静态目录。
-- 提供健康检查、手动触发同步和查看 cursor 的 HTTP API。
-
-## 同步字段
-
-默认写入的主表为 `公众号文章`。当前同步字段包括：
-
-- `文章标题`
-- `唯一键`
-- `文章ID`
-- `消息ID`
-- `文章位置`
-- `作者`
-- `摘要`
-- `文章链接`
-- `封面素材ID`
-- `显示封面图`
-- `是否已删除`
-- `更新时间戳`
-- `更新时间`
-- `发布日期`
-- `发布月份`
-- `正文HTML`
-- `文章内容`
-- `正文来源`
-- `封面图链接`
-- `正文图片链接`
-- `同步时间`
+- 官方 API 采集器在 `08:05` 后启动会自动补跑一次，此后每天 `08:05` 执行；`08:05` 前启动会等待当天窗口。
+- 提供健康检查、手动触发采集与 Base 写回的 HTTP API。
 
 ## 技术栈
 
@@ -72,7 +43,6 @@
 - SQLite（`modernc.org/sqlite`，无 CGO）
 - 微信公众号官方 API
 - 飞书开放平台与多维表格 API
-- 可选阿里云 OSS 媒体存储
 
 ## 项目结构
 
@@ -83,8 +53,8 @@
 ├── analytics/           # 21 个数据接口、内容接口采集器和调度
 ├── archive/             # SQLite 原始响应、指标行、游标和内容归档
 ├── autolayout/          # 官方发表正文的基线、持久 outbox 与排版投递
-├── sync/                # 主同步、scheduler、cursor、媒体和历史 worker
-├── wechat/              # 微信 API、token、素材、正文和图片处理
+├── sync/                # 旧直连同步留下的 cursor 读取（/health、/api/feishu/cursor）
+├── wechat/              # 微信 API、token、配额
 ├── feishu/              # 飞书 token 与多维表格写入
 ├── .env.example         # 环境变量示例
 └── go.mod
@@ -181,38 +151,6 @@ scripts/deploy-cloud-assistant.sh
 - `WECHAT_ENDPOINT_DAILY_QUOTA_LIMIT`，每个官方接口各自的日上限，默认且最高 `1000`；旧名 `WECHAT_DAILY_QUOTA_LIMIT` 仅兼容
 - `WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE`，每接口默认保留 `200`，因此默认可用预算为 `800`；也可用 `WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE_PERCENT` 覆盖
 - `WECHAT_QUOTA_FILE`，按接口持久化预算计数的文件；写入失败会回滚本次内存预占并 fail closed
-- `WECHAT_PUBLISHED_PAGE_SIZE`
-- `WECHAT_PUBLISHED_RECENT_PAGES`
-- `WECHAT_PUBLISHED_BACKFILL_GROW_PAGES`
-- `WECHAT_SYNC_COVER_INLINE`
-- `WECHAT_SYNC_BODY_IMAGES_INLINE`
-- `PUBLIC_MEDIA_DIR`
-- `PUBLIC_BASE_URL`，本地转存图片的对外链接前缀；未配置 OSS 时必填
-
-媒体 worker：
-
-- `ENABLE_MEDIA_WORKER`
-- `MEDIA_WORKER_BATCH_SIZE`
-- `MEDIA_WORKER_CONCURRENCY`
-- `MEDIA_WORKER_INITIAL_DELAY_SECONDS`
-- `MEDIA_WORKER_INTERVAL_MINUTES`
-
-历史素材 worker（旧版可选能力，默认不启用）：
-
-- `ENABLE_HISTORY_WORKER`
-- `HISTORY_WORKER_INITIAL_DELAY_SECONDS`
-- `HISTORY_WORKER_INTERVAL_MINUTES`
-- `MATERIAL_HISTORY_PAGE_SIZE`
-- `MATERIAL_HISTORY_MAX_CALLS_PER_RUN`
-- `HISTORY_WORKER_WRITE_PAUSE_MS`
-
-阿里云 OSS：
-
-- `OSS_ACCESS_KEY_ID`
-- `OSS_ACCESS_KEY_SECRET`
-- `OSS_BUCKET`
-- `OSS_REGION`
-- `OSS_BUCKET_DOMAIN`
 
 完整示例见 [.env.example](.env.example)。
 
@@ -279,31 +217,16 @@ X-API-Key: <token>
 - 旧 `ENABLE_FEISHU_SYNC` 链路会绕过 SQLite 全量关联和人工确认，现已永久 fail closed。
 - `/api/feishu/sync` 固定返回 `410`；唯一允许的 Base 写入入口是带历史覆盖门禁的 `/api/feishu/official-sync`。
 
-### 媒体 worker
-
-- 默认启用。
-- 补齐 `封面图链接` 和 `正文图片链接`。
-- 优先写入 OSS；未配置 OSS 时写入本地 `PUBLIC_MEDIA_DIR` 或 `./media`，链接前缀取 `PUBLIC_BASE_URL`。两者都没配置时不转存，直接返回错误。
-- 不阻塞主同步。
-
-### 历史素材 worker（旧版可选能力）
-
-- 默认不启用，也不属于当前“已发布文章”同步范围。
-- 分页遍历素材库中的图文消息。
-- 使用 `cursor.materialNewsOffset` 断点续传。
-- 内置配额感知，达到限制后自动暂停。
-
 ## 部署建议
 
 - 使用 systemd 或类似进程管理器托管编译后的二进制。
-- 工作目录保留二进制、`.env`、`.sync-cursor.json` 和可选 `media/`。
+- 工作目录保留二进制、`.env` 和 `.sync-cursor.json`。
 - 2026-09-15 起服务运行在资讯机（FBIF-内部工具服务器 101.133.154.40），与 feed.foodtalks.cn 同机；工作目录 `/opt/fbif-wechat-article-dashboard/bin`，归档库 `/root/mp-archive/mp-archive.db`。此前的 GitHub Actions SSH 部署已移除：资讯机 22 端口只对少数运维 IP 开放，统一改走 `scripts/deploy-cloud-assistant.sh`。环境文件 `.env` 由服务器持有，不再经 Secrets 下发。`WECHAT_SECRET`、`API_KEY`、`PUBLISH_SYNC_SERVICE_TOKEN` 2026-10-26 起由 FBIF 中台的本机代理写进 `/etc/fbif-hub/env/wechat-sync.env`，systemd drop-in `wechat-sync.service.d/zz-fbif-hub.conf` 把它带进进程环境；程序读 `.env` 时不覆盖环境里已有的值，所以以中台为准，`.env` 里不再写这三项。换值在内部工具服务器上 `hubctl put <编号>`，见 FBIF-One-Api `docs/hub/公共变量和密钥.md`。
 - 监控探针（FoodTalks_Feed 的 `monitoring/watchdog.py`）与本服务同机，直接探 `127.0.0.1:3002`，不再经 Caddy 跨机反代。
 - 不要把一次性迁移或重型脚本放进常驻同步服务的启动流程。
 
 ## 注意事项
 
-- `.sync-cursor.json` 是本地同步进度文件，不是业务数据。
-- 主同步链路优先保证稳定，媒体补齐和历史回填不应影响主同步。
+- `.sync-cursor.json` 是旧直连同步留下的进度文件，不是业务数据；现行代码只读不写。
 - 6 个旧文章分析接口已由微信返回 `47009 this api is offline, please use the new api`；服务不会无限重试，而是记录下线响应并使用新接口。
 - `freepublish/batchget` 仅提供一条官方发布对象采集流；它的分页完成不等于历史文章全量已经核验。本服务不用网页或订阅源补造数据，历史全量结论按 [已发布文章真值合同](docs/PUBLISHED-ARTICLE-TRUTH-CONTRACT.md) 执行。

@@ -18,7 +18,7 @@ FBIF 内容链路由**三个互相独立的系统**组成，各有各的代码�
 
 当天发布发现是另一条节奏：启用自动排版时，`analytics/runtime.go` 在 08:30–18:30 按 `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`（默认 15）调用 `PollLayout`；它先通过 `Content.RefreshPublished` 请求微信官方 `freepublish/batchget` 最新页，再处理持久化 outbox。该轮询会消耗 `freepublish/batchget` 的独立接口额度，不是只扫本地库。
 
-`sync/scheduler.go` 中 09:00 的旧 scheduler 当前没有从 `main.go` 启动，不能再用它推断运行时调度。现行调度真值是 `main.go` 启动的 `analytics.Runtime`。
+旧直连飞书的 scheduler、媒体 worker、历史素材 worker 从未从 `main.go` 启动，已于 2026-11-03 删除。现行调度真值是 `main.go` 启动的 `analytics.Runtime`。
 
 `FoodTalks_Feed` 的 RSS 实时监控仍是独立系统；它与本项目的官方发布轮询可以先后发现同一文章，排版侧依靠 `source_key` 幂等去重。
 

@@ -83,21 +83,22 @@ func main() {
 	if featureEnabled("ENABLE_FEISHU_SYNC", false) {
 		log.Println("[Safety] Legacy direct Feishu sync remains disabled: SQLite-first and historical coverage approval are mandatory")
 	}
-	if officialRuntime != nil {
-		officialRuntime.Start(stopCh)
-	}
-	if officialPublishCallback != nil {
-		officialPublishCallback.Start(stopCh)
-		log.Println("[PublishCallback] official MASSSENDJOBFINISH callback enabled")
-	}
 	if officialbase.Enabled() {
 		if officialRuntime == nil {
 			log.Println("[OfficialBase] disabled because official API collector is unavailable")
 		} else {
 			officialBaseSyncer = officialbase.NewFromEnv(officialRuntime.Store)
 			officialBaseSyncer.BeforeSync = officialRuntime.RequireHistoricalCoverageForBaseSync
+			officialRuntime.ArchiveChanged = officialBaseSyncer.Wake
 			officialbase.Start(stopCh, officialBaseSyncer)
 		}
+	}
+	if officialRuntime != nil {
+		officialRuntime.Start(stopCh)
+	}
+	if officialPublishCallback != nil {
+		officialPublishCallback.Start(stopCh)
+		log.Println("[PublishCallback] official MASSSENDJOBFINISH callback enabled")
 	}
 
 	addr := fmt.Sprintf(":%d", config.Env.ServerPort)
@@ -440,6 +441,7 @@ func officialCallHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "invalid JSON: " + err.Error()})
 		return
 	}
+	defer officialBaseSyncer.Wake()
 	if _, ok := wechat.DataCubeEndpointByName(request.Endpoint); ok {
 		if request.BeginDate == "" || request.EndDate == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "begin_date and end_date are required"})

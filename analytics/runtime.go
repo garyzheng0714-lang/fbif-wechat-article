@@ -24,6 +24,9 @@ type Runtime struct {
 	Layout    *autolayout.Dispatcher
 	Reporter  Reporter
 
+	// ArchiveChanged 在每次写完归档后调用，Base 写回靠它叫醒而不是定时轮询。
+	ArchiveChanged func()
+
 	runMu sync.Mutex
 
 	deferredWake chan struct{}
@@ -138,6 +141,7 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 		return nil, fmt.Errorf("official API collector is already running")
 	}
 	defer r.runMu.Unlock()
+	defer r.notifyArchiveChanged()
 
 	result := &CombinedRunResult{}
 	runNow := time.Now()
@@ -390,7 +394,14 @@ func (r *Runtime) RetryDeferred(ctx context.Context) (*RunResult, error) {
 		return nil, fmt.Errorf("official API collector is already running")
 	}
 	defer r.runMu.Unlock()
+	defer r.notifyArchiveChanged()
 	return r.Analytics.RetryDeferred(ctx)
+}
+
+func (r *Runtime) notifyArchiveChanged() {
+	if r.ArchiveChanged != nil {
+		r.ArchiveChanged()
+	}
 }
 
 func nextScheduledCollection(now time.Time) time.Time {
@@ -464,6 +475,7 @@ func (r *Runtime) PollLayout(ctx context.Context) (*autolayout.RunResult, error)
 		return nil, fmt.Errorf("official API collector is already running")
 	}
 	defer r.runMu.Unlock()
+	defer r.notifyArchiveChanged()
 	_, refreshErr := r.Content.RefreshPublished(ctx)
 	result, layoutErr := r.Layout.Sync(ctx)
 	return result, errors.Join(refreshErr, layoutErr)

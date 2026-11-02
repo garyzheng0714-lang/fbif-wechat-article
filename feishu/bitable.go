@@ -103,9 +103,35 @@ func feishuAppRequest(method, path string, body interface{}) (json.RawMessage, e
 
 var (
 	tableIDCache   = make(map[string]string)
+	fieldCache     = make(map[string]map[string]bool)
 	tableIDCacheMu sync.Mutex
 	recordWriteMu  sync.Mutex
 )
+
+// forgetTable drops what we cached about a table after a write fails, so the
+// next run re-reads its ID and fields (a person may have renamed or deleted them).
+func forgetTable(tableID string) {
+	tableIDCacheMu.Lock()
+	defer tableIDCacheMu.Unlock()
+	delete(fieldCache, tableID)
+	for name, id := range tableIDCache {
+		if id == tableID {
+			delete(tableIDCache, name)
+		}
+	}
+}
+
+func fieldsKnown(tableID string, required []FieldSpec) bool {
+	tableIDCacheMu.Lock()
+	defer tableIDCacheMu.Unlock()
+	known := fieldCache[tableID]
+	for _, field := range required {
+		if !known[field.Name] {
+			return false
+		}
+	}
+	return known != nil
+}
 
 // GetOrCreateTable looks up or creates a Feishu Bitable table by name.
 // An optional primaryFieldName can be provided; when the table is newly created
@@ -216,6 +242,9 @@ func getExistingFields(tableID string) (map[string]bool, error) {
 }
 
 func EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
+	if fieldsKnown(tableID, requiredFields) {
+		return nil
+	}
 	existing, err := getExistingFields(tableID)
 	if err != nil {
 		return err
@@ -235,8 +264,12 @@ func EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
 		if err != nil {
 			return fmt.Errorf("create field %s: %w", field.Name, err)
 		}
+		existing[field.Name] = true
 	}
 
+	tableIDCacheMu.Lock()
+	fieldCache[tableID] = existing
+	tableIDCacheMu.Unlock()
 	return nil
 }
 
@@ -318,6 +351,7 @@ func BatchCreateByRecordFieldsWithIDs(tableID string, records []map[string]inter
 		}, tableID)
 		recordWriteMu.Unlock()
 		if err != nil {
+			forgetTable(tableID)
 			return recordIDs, fmt.Errorf("batch create with IDs (offset %d): %w", i, err)
 		}
 		var result struct {
@@ -357,6 +391,7 @@ func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) err
 		}, tableID)
 		recordWriteMu.Unlock()
 		if err != nil {
+			forgetTable(tableID)
 			return fmt.Errorf("batch update (offset %d): %w", i, err)
 		}
 		updated += len(batch)

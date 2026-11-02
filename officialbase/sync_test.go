@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/feishu"
@@ -102,4 +104,97 @@ func TestPayloadHashIsStableAcrossMapOrder(t *testing.T) {
 	if payloadHash(left) != payloadHash(right) {
 		t.Fatal("JSON map key order must not cause a spurious Base update")
 	}
+}
+
+func openGatedSyncer(t *testing.T) (*Syncer, *archive.Store) {
+	t.Helper()
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return &Syncer{Store: store, BeforeSync: func(context.Context) error { return nil }}, store
+}
+
+func TestRoundWithNothingToWriteNeverCallsFeishu(t *testing.T) {
+	syncer, _ := openGatedSyncer(t)
+	result, err := syncer.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("idle round must not reach Feishu (no credentials are configured in tests): %v", err)
+	}
+	for key, dataset := range result.Datasets {
+		if dataset != (DatasetResult{}) {
+			t.Fatalf("%s: idle round touched rows: %+v", key, dataset)
+		}
+	}
+}
+
+func TestRoundWithNewArchiveRowWritesToFeishu(t *testing.T) {
+	syncer, store := openGatedSyncer(t)
+	if _, err := store.SaveFetch(context.Background(), archive.FetchRecord{
+		Endpoint:     "getusersummary",
+		Category:     "user",
+		ResponseJSON: []byte(`{"list":[]}`),
+		HTTPStatus:   200,
+		Success:      true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := syncer.Sync(context.Background())
+	if err == nil || !strings.Contains(result.Errors[archive.BaseDatasetAPIFetches], "Feishu credentials not configured") {
+		t.Fatalf("a new archived row must be sent to Feishu, got %v", err)
+	}
+}
+
+func TestWorkerSyncsOnWakeAndOnFallbackOnly(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var rounds atomic.Int32
+	syncer := &Syncer{
+		Store:      store,
+		BeforeSync: func(context.Context) error { rounds.Add(1); return errors.New("gate closed") },
+		wake:       make(chan struct{}, 1),
+	}
+	waitFor := func(want int32) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for rounds.Load() < want && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		if got := rounds.Load(); got != want {
+			t.Fatalf("rounds = %d, want %d", got, want)
+		}
+	}
+
+	stop := make(chan struct{})
+	go syncer.run(stop, time.Hour, 20*time.Millisecond, time.Hour)
+	waitFor(0)
+	syncer.Wake()
+	syncer.Wake()
+	syncer.Wake()
+	waitFor(1)
+	syncer.Wake()
+	waitFor(2)
+	close(stop)
+
+	fallbackStop := make(chan struct{})
+	defer close(fallbackStop)
+	rounds.Store(0)
+	go syncer.run(fallbackStop, time.Millisecond, time.Hour, 150*time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for rounds.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if rounds.Load() < 3 {
+		t.Fatalf("fallback timer must keep running rounds without wakes, got %d", rounds.Load())
+	}
+}
+
+func TestWakeOnDisabledSyncerIsNoOp(t *testing.T) {
+	var syncer *Syncer
+	syncer.Wake()
 }

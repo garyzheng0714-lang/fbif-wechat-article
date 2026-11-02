@@ -20,6 +20,8 @@ FBIF 内容链路由**三个互相独立的系统**组成，各有各的代码�
 
 旧直连飞书的 scheduler、媒体 worker、历史素材 worker 从未从 `main.go` 启动，已于 2026-11-03 删除。现行调度真值是 `main.go` 启动的 `analytics.Runtime`。
 
+Base 写回（`officialbase`）不定时轮询：`analytics.Runtime` 每轮写完归档调 `ArchiveChanged` 叫醒它，没有待写行时不调飞书；进程内兜底每 6 小时一轮。不要再加分钟级定时器。
+
 `FoodTalks_Feed` 的 RSS 实时监控仍是独立系统；它与本项目的官方发布轮询可以先后发现同一文章，排版侧依靠 `source_key` 幂等去重。
 
 两个监控端 → `POST /api/publish/site-sync` → 排版工具。**载荷只有链接**，不含正文、标题、来源、作者、封面（排版侧对这五个字段一律 400）。本项目已于提交 `5f036db` 收敛到位，`autolayout.Article` 只有 url 加三个类型证据字段，**不得回退**。

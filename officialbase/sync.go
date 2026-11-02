@@ -199,6 +199,7 @@ type Syncer struct {
 	BeforeSync     func(context.Context) error
 
 	runMu sync.Mutex
+	wake  chan struct{}
 }
 
 type preparedCandidate struct {
@@ -227,10 +228,7 @@ func (s *Syncer) Sync(ctx context.Context) (*RunResult, error) {
 		Datasets:  make(map[string]DatasetResult, len(datasets)),
 		Errors:    make(map[string]string),
 	}
-	limit := s.RowsPerDataset
-	if limit <= 0 {
-		limit = 500
-	}
+	limit := s.rowLimit()
 	var runErrors []error
 	for _, dataset := range datasets {
 		datasetResult, err := s.syncDataset(ctx, dataset, limit)
@@ -249,6 +247,10 @@ func (s *Syncer) Sync(ctx context.Context) (*RunResult, error) {
 
 func (s *Syncer) syncDataset(ctx context.Context, dataset Dataset, limit int) (DatasetResult, error) {
 	var result DatasetResult
+	candidates, err := s.Store.ListBaseSyncCandidates(ctx, dataset.Key, limit)
+	if err != nil || len(candidates) == 0 {
+		return result, err
+	}
 	tableID, err := feishu.GetOrCreateTable(dataset.TableName, dataset.PrimaryField)
 	if err != nil {
 		return result, fmt.Errorf("get or create table: %w", err)
@@ -275,11 +277,9 @@ func (s *Syncer) syncDataset(ctx context.Context, dataset Dataset, limit int) (D
 				return result, err
 			}
 		}
-	}
-
-	candidates, err := s.Store.ListBaseSyncCandidates(ctx, dataset.Key, limit)
-	if err != nil {
-		return result, err
+		if candidates, err = s.Store.ListBaseSyncCandidates(ctx, dataset.Key, limit); err != nil {
+			return result, err
+		}
 	}
 	result.Scanned = len(candidates)
 	fieldTypes := make(map[string]int, len(dataset.Fields))
@@ -414,6 +414,13 @@ func payloadHash(fields map[string]interface{}) string {
 	return hex.EncodeToString(hash[:])
 }
 
+func (s *Syncer) rowLimit() int {
+	if s.RowsPerDataset <= 0 {
+		return 500
+	}
+	return s.RowsPerDataset
+}
+
 func (s *Syncer) now() time.Time {
 	if s.Now != nil {
 		return s.Now()
@@ -430,40 +437,75 @@ func NewFromEnv(store *archive.Store) *Syncer {
 	return &Syncer{
 		Store:          store,
 		RowsPerDataset: envInt("OFFICIAL_BASE_SYNC_ROWS_PER_DATASET", 500),
+		wake:           make(chan struct{}, 1),
 	}
 }
+
+// Wake asks the worker for one more round. It never blocks; wakes that arrive
+// before the round starts collapse into one.
+func (s *Syncer) Wake() {
+	if s == nil || s.wake == nil {
+		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
+}
+
+const wakeDebounce = 5 * time.Second
 
 func Start(stopCh <-chan struct{}, syncer *Syncer) {
 	if syncer == nil {
 		return
 	}
 	initialDelay := time.Duration(envInt("OFFICIAL_BASE_SYNC_INITIAL_DELAY_SECONDS", 20)) * time.Second
-	interval := time.Duration(envInt("OFFICIAL_BASE_SYNC_INTERVAL_MINUTES", 5)) * time.Minute
-	go func() {
-		timer := time.NewTimer(initialDelay)
-		defer timer.Stop()
+	fallback := time.Duration(envInt("OFFICIAL_BASE_SYNC_FALLBACK_HOURS", 6)) * time.Hour
+	go syncer.run(stopCh, initialDelay, wakeDebounce, fallback)
+	log.Printf("[OfficialBase] worker started: on archive change after %s, fallback every %s, rows_per_dataset=%d", wakeDebounce, fallback, syncer.rowLimit())
+}
+
+func (s *Syncer) run(stopCh <-chan struct{}, initialDelay, debounce, fallback time.Duration) {
+	timer := time.NewTimer(initialDelay)
+	defer timer.Stop()
+	for {
 		select {
 		case <-timer.C:
-		case <-stopCh:
-			return
-		}
-		for {
-			result, err := syncer.Sync(context.Background())
-			if result != nil {
-				log.Printf("[OfficialBase] datasets=%d started=%d finished=%d", len(result.Datasets), result.StartedAt, result.FinishedAt)
-			}
-			if err != nil {
-				log.Printf("[OfficialBase] sync completed with errors: %v", err)
-			}
-			timer.Reset(interval)
+		case <-s.wake:
 			select {
-			case <-timer.C:
+			case <-time.After(debounce):
 			case <-stopCh:
 				return
 			}
+			select {
+			case <-s.wake:
+			default:
+			}
+		case <-stopCh:
+			return
 		}
-	}()
-	log.Printf("[OfficialBase] worker started: interval=%s rows_per_dataset=%d", interval, syncer.RowsPerDataset)
+		s.syncAndLog()
+		timer.Reset(fallback)
+	}
+}
+
+func (s *Syncer) syncAndLog() {
+	result, err := s.Sync(context.Background())
+	if result != nil {
+		created, updated, backlog := 0, 0, false
+		for _, dataset := range result.Datasets {
+			created += dataset.Created
+			updated += dataset.Updated
+			backlog = backlog || dataset.Scanned >= s.rowLimit()
+		}
+		log.Printf("[OfficialBase] round done: created=%d updated=%d backlog=%t", created, updated, backlog)
+		if backlog && err == nil {
+			s.Wake()
+		}
+	}
+	if err != nil {
+		log.Printf("[OfficialBase] sync completed with errors: %v", err)
+	}
 }
 
 func envInt(key string, fallback int) int {

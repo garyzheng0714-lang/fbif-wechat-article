@@ -1,9 +1,11 @@
 package analytics
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
@@ -87,5 +89,25 @@ func TestNextLayoutPollStaysInsideMonitoringWindow(t *testing.T) {
 		if got := nextLayoutPoll(tc.now, interval); !got.Equal(tc.want) {
 			t.Fatalf("now=%s got=%s want=%s", tc.now, got, tc.want)
 		}
+	}
+}
+
+func TestArchiveWriteRoundNotifiesBaseSync(t *testing.T) {
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	notified := 0
+	runtime := &Runtime{
+		Store:          store,
+		Analytics:      &Collector{Client: &fakeClient{}, Store: store, MaxCalls: 15},
+		ArchiveChanged: func() { notified++ },
+	}
+	if _, err := runtime.RetryDeferred(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if notified != 1 {
+		t.Fatalf("Base sync notified %d times after one archive round, want 1", notified)
 	}
 }

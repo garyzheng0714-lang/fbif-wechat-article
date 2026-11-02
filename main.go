@@ -18,6 +18,7 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/officialbase"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/publishcallback"
+	"github.com/garyzheng0714-lang/fbif-wechat-article/schedule"
 	appSync "github.com/garyzheng0714-lang/fbif-wechat-article/sync"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
@@ -33,9 +34,11 @@ func main() {
 	}
 	config.Init()
 	configureRuntime()
+	plan := schedule.FromEnv()
+	log.Printf("[Schedule] 总账本「定时任务和回调」现在按 %s", plan)
 	if analytics.Enabled() {
 		var err error
-		officialRuntime, err = analytics.NewRuntimeFromEnv()
+		officialRuntime, err = analytics.NewRuntimeFromEnv(plan)
 		if err != nil {
 			log.Fatalf("initialize official API collector: %v", err)
 		}
@@ -90,7 +93,7 @@ func main() {
 			officialBaseSyncer = officialbase.NewFromEnv(officialRuntime.Store)
 			officialBaseSyncer.BeforeSync = officialRuntime.RequireHistoricalCoverageForBaseSync
 			officialRuntime.ArchiveChanged = officialBaseSyncer.Wake
-			officialbase.Start(stopCh, officialBaseSyncer)
+			officialbase.Start(stopCh, officialBaseSyncer, plan.BaseSyncFallback)
 		}
 	}
 	if officialRuntime != nil {

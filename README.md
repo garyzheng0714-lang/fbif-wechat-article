@@ -100,6 +100,16 @@ scripts/deploy-cloud-assistant.sh
 - `FEISHU_BITABLE_APP_TOKEN`
 - `API_KEY`
 
+轮询和定时的时间在 FBIF 中台总账本「定时任务和回调」改「多久一次」，中台写进 `/etc/fbif-hub/env/wechat-sync.env`，不写进 `.env`。变量没下发或看不懂时用默认值；启动日志 `[Schedule]` 那一行列出现在按什么跑。
+
+| 总账本那一行 | 变量 | 默认 |
+| --- | --- | --- |
+| 公众号数据抓取 `reczz28NbDlb780a` | `ANALYTICS_TIMES` | `08:05`，逗号隔开几个时刻就每个时刻都跑 |
+| 公众号发文轮询 `reczz28NbDlb8bqz` | `AUTO_LAYOUT_POLL_WINDOW`、`AUTO_LAYOUT_POLL_SECONDS` | `08:30-18:45`、`900`；结尾那一刻不跑，最后一次 `18:30` |
+| 文章数据写回兜底 `reczz28UubKiJIss` | `OFFICIAL_BASE_SYNC_FALLBACK_SECONDS` | `21600` |
+
+`freepublish` 心跳告警跟着发文轮询走：时段内超过 3 个间隔没成功才报。
+
 官方采集器：
 
 - `OFFICIAL_API_DB_PATH`，默认 `./data/wechat-official.db`
@@ -113,7 +123,6 @@ scripts/deploy-cloud-assistant.sh
 官方数据写回 Base（显式开启）：
 
 - `ENABLE_OFFICIAL_BASE_SYNC=1`
-- `OFFICIAL_BASE_SYNC_FALLBACK_HOURS`，兜底轮次间隔，默认 `6`
 - `OFFICIAL_BASE_SYNC_ROWS_PER_DATASET`，默认每轮每张表 `500`
 - `OFFICIAL_BASE_SYNC_INITIAL_DELAY_SECONDS`，默认 `20`
 - 即使开启 worker，`historicalCoverage.verified` 未经完整审计和人工确认时也会在调用飞书接口前拒绝写入
@@ -127,7 +136,6 @@ scripts/deploy-cloud-assistant.sh
 > 投递载荷**只有文章链接加类型证据**，不含正文、标题、作者与封面——排版服务两个
 > 发布入口只接收链接并自己抓原文（其侧红线 33），带正文字段会被 400 拒收。
 - `LAYOUT_SOURCE_NAME`，默认 `FBIF食品饮料创新`
-- `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`，默认 `15`；只在北京时间 `08:30` 至 `18:30`（含首尾）生效
 - `AUTO_LAYOUT_MAX_DELIVERIES_PER_RUN`，默认 `20`
 
 日报与停摆告警：

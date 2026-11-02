@@ -14,6 +14,7 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/autolayout"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
+	"github.com/garyzheng0714-lang/fbif-wechat-article/schedule"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
@@ -23,6 +24,9 @@ type Runtime struct {
 	Content   *ContentCollector
 	Layout    *autolayout.Dispatcher
 	Reporter  Reporter
+
+	Collection schedule.Daily
+	LayoutPoll schedule.Every
 
 	// ArchiveChanged 在每次写完归档后调用，Base 写回靠它叫醒而不是定时轮询。
 	ArchiveChanged func()
@@ -52,7 +56,7 @@ type RuntimeStatus struct {
 	Warnings              []string                          `json:"warnings,omitempty"`
 }
 
-func NewRuntimeFromEnv() (*Runtime, error) {
+func NewRuntimeFromEnv(plan schedule.Plan) (*Runtime, error) {
 	databasePath := strings.TrimSpace(os.Getenv("OFFICIAL_API_DB_PATH"))
 	if databasePath == "" {
 		databasePath = "./data/wechat-official.db"
@@ -78,6 +82,8 @@ func NewRuntimeFromEnv() (*Runtime, error) {
 			Store:    store,
 			MaxCalls: envInt("CONTENT_MAX_CALLS_PER_RUN", 400),
 		},
+		Collection:   plan.Collection,
+		LayoutPoll:   plan.LayoutPoll,
 		deferredWake: make(chan struct{}, 1),
 		Reporter:     NewFeishuReporterFromEnv(),
 	}
@@ -144,8 +150,7 @@ func (r *Runtime) Run(ctx context.Context) (*CombinedRunResult, error) {
 	defer r.notifyArchiveChanged()
 
 	result := &CombinedRunResult{}
-	runNow := time.Now()
-	monitorRecent := withinLayoutMonitoringWindow(runNow)
+	monitorRecent := r.LayoutPoll.Covers(time.Now())
 
 	// 工作时段内的完整采集会刷新最新已发布文章并补充图集类型；
 	// 时段外只推进历史详情，不调用最新草稿与发布页。各官方接口的
@@ -276,7 +281,7 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 	go r.startDeferredRetryWorker(stopCh)
 	if r.Layout != nil {
 		// 调度器必须独立于耗时的历史回填启动；即使初始全量采集失败或很慢，
-		// 08:30—18:30 的 freepublish 最新页轮询仍会按自己的时钟运行。
+		// 发文时段里的 freepublish 最新页轮询仍会按自己的时钟运行。
 		go r.startLayoutPolling(stopCh)
 	}
 	initialDelay := time.Duration(envInt("OFFICIAL_COLLECTOR_INITIAL_DELAY_SECONDS", 5)) * time.Second
@@ -286,7 +291,7 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 		select {
 		case <-timer.C:
 			initialNow := time.Now()
-			if r.Layout != nil && withinLayoutMonitoringWindow(initialNow) {
+			if r.Layout != nil && r.LayoutPoll.Covers(initialNow) {
 				layoutResult, layoutErr := r.PollLayout(context.Background())
 				if layoutResult != nil {
 					log.Printf("[AutoLayout] initial poll discovered=%d delivered=%d failed=%d", layoutResult.Discovered, layoutResult.Delivered, layoutResult.Failed)
@@ -295,14 +300,14 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 					log.Printf("[AutoLayout] initial poll completed with errors: %v", layoutErr)
 				}
 			}
-			if dailyCollectionReady(initialNow) {
+			if r.Collection.Begun(initialNow) {
 				result, err := r.Run(context.Background())
 				if err != nil {
 					log.Printf("[OfficialCollector] Initial run completed with errors: %v", err)
 				}
 				r.signalDeferredRetry(result)
 			} else {
-				log.Printf("[OfficialCollector] Initial D-1 collection deferred until 08:05 Asia/Shanghai")
+				log.Printf("[OfficialCollector] Initial D-1 collection deferred until %s Asia/Shanghai", r.Collection[0])
 			}
 		case <-stopCh:
 			return
@@ -310,7 +315,7 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 
 		for {
 			now := time.Now()
-			next := nextScheduledCollection(now)
+			next := r.Collection.Next(now)
 			timer.Reset(next.Sub(now))
 			log.Printf("[OfficialCollector] Next run at %s", next.Format("2006-01-02 15:04:05"))
 			select {
@@ -404,27 +409,11 @@ func (r *Runtime) notifyArchiveChanged() {
 	}
 }
 
-func nextScheduledCollection(now time.Time) time.Time {
-	localNow := now.In(wechat.ShanghaiLoc())
-	next := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 5, 0, 0, wechat.ShanghaiLoc())
-	if !next.After(localNow) {
-		next = next.AddDate(0, 0, 1)
-	}
-	return next
-}
-
-func dailyCollectionReady(now time.Time) bool {
-	localNow := now.In(wechat.ShanghaiLoc())
-	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 5, 0, 0, wechat.ShanghaiLoc())
-	return !localNow.Before(start)
-}
-
 func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {
-	interval := time.Duration(envInt("AUTO_LAYOUT_POLL_INTERVAL_MINUTES", 15)) * time.Minute
-	next := nextLayoutPoll(time.Now(), interval)
+	next := r.LayoutPoll.Next(time.Now())
 	timer := time.NewTimer(time.Until(next))
 	defer timer.Stop()
-	log.Printf("[AutoLayout] Polling official freepublish every %s between 08:30 and 18:30; next at %s", interval, next.Format("2006-01-02 15:04:05"))
+	log.Printf("[AutoLayout] Polling official freepublish every %s in %s; next at %s", r.LayoutPoll.Interval, r.LayoutPoll.Window, next.Format("2006-01-02 15:04:05"))
 	for {
 		select {
 		case <-timer.C:
@@ -435,34 +424,12 @@ func (r *Runtime) startLayoutPolling(stopCh <-chan struct{}) {
 			if err != nil {
 				log.Printf("[AutoLayout] poll completed with errors: %v", err)
 			}
-			next = nextLayoutPoll(time.Now(), interval)
+			next = r.LayoutPoll.Next(time.Now())
 			timer.Reset(time.Until(next))
 		case <-stopCh:
 			return
 		}
 	}
-}
-
-func withinLayoutMonitoringWindow(now time.Time) bool {
-	localNow := now.In(wechat.ShanghaiLoc())
-	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 30, 0, 0, wechat.ShanghaiLoc())
-	end := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 18, 30, 0, 0, wechat.ShanghaiLoc())
-	return !localNow.Before(start) && !localNow.After(end)
-}
-
-func nextLayoutPoll(now time.Time, interval time.Duration) time.Time {
-	localNow := now.In(wechat.ShanghaiLoc())
-	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 8, 30, 0, 0, wechat.ShanghaiLoc())
-	end := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 18, 30, 0, 0, wechat.ShanghaiLoc())
-	if localNow.Before(start) {
-		return start
-	}
-	steps := int(localNow.Sub(start)/interval) + 1
-	next := start.Add(time.Duration(steps) * interval)
-	if next.After(end) {
-		return start.AddDate(0, 0, 1)
-	}
-	return next
 }
 
 // PollLayout 串行执行一次轻量官方发布轮询和 outbox 投递。与完整日采集共用

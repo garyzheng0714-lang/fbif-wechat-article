@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -460,4 +461,52 @@ func encryptForTest(t *testing.T, key, message []byte, appID string) string {
 	encrypted := make([]byte, len(plain))
 	cipher.NewCBCEncrypter(block, key[:aes.BlockSize]).CryptBlocks(encrypted, plain)
 	return base64.StdEncoding.EncodeToString(encrypted)
+}
+
+type queuedSubmitter struct {
+	urls      chan string
+	failFirst atomic.Bool
+}
+
+func (q *queuedSubmitter) SubmitURL(_ context.Context, article autolayout.Article) (autolayout.Receipt, error) {
+	q.urls <- article.URL
+	if q.failFirst.CompareAndSwap(true, false) {
+		return autolayout.Receipt{}, fmt.Errorf("temporary site-sync failure")
+	}
+	return autolayout.Receipt{JobID: 1, Stage: "enriching"}, nil
+}
+
+func TestWorkerWakesOnCallbackAndRetriesAtDueTime(t *testing.T) {
+	const token = "callback-secret"
+	submitter := &queuedSubmitter{urls: make(chan string, 8)}
+	submitter.failFirst.Store(true)
+	service, _ := openTestService(t, submitter, Config{Token: token, RetryDelay: 300 * time.Millisecond})
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	service.Start(stop)
+	time.Sleep(50 * time.Millisecond)
+
+	recorder := postPlain(t, service, token, plainEventXML("send success"), callbackSignature(token, "1784162171", "n-1"))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	expect := func(want string, within time.Duration) {
+		t.Helper()
+		select {
+		case got := <-submitter.urls:
+			if got != want {
+				t.Fatalf("delivered %s, want %s", got, want)
+			}
+		case <-time.After(within):
+			t.Fatalf("%s not delivered within %s", want, within)
+		}
+	}
+	expect("https://mp.weixin.qq.com/s/first", time.Second)
+	expect("https://mp.weixin.qq.com/s?__biz=MzA3&mid=2&idx=2&sn=x", time.Second)
+	expect("https://mp.weixin.qq.com/s/first", 2*time.Second)
+	select {
+	case extra := <-submitter.urls:
+		t.Fatalf("nothing was due, yet %s was delivered", extra)
+	case <-time.After(500 * time.Millisecond):
+	}
 }

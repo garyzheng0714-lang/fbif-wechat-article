@@ -455,12 +455,11 @@ func (s *Syncer) Wake() {
 
 const wakeDebounce = 5 * time.Second
 
-func Start(stopCh <-chan struct{}, syncer *Syncer) {
+func Start(stopCh <-chan struct{}, syncer *Syncer, fallback time.Duration) {
 	if syncer == nil {
 		return
 	}
 	initialDelay := time.Duration(envInt("OFFICIAL_BASE_SYNC_INITIAL_DELAY_SECONDS", 20)) * time.Second
-	fallback := time.Duration(envInt("OFFICIAL_BASE_SYNC_FALLBACK_HOURS", 6)) * time.Hour
 	go syncer.run(stopCh, initialDelay, wakeDebounce, fallback)
 	log.Printf("[OfficialBase] worker started: on archive change after %s, fallback every %s, rows_per_dataset=%d", wakeDebounce, fallback, syncer.rowLimit())
 }

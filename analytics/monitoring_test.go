@@ -9,6 +9,7 @@ import (
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/autolayout"
+	"github.com/garyzheng0714-lang/fbif-wechat-article/schedule"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
@@ -35,8 +36,9 @@ func TestMonitoringStatusChecksSchedulerDeferredAndOutboxWithoutClaimingCoverage
 		Analytics: &Collector{
 			Store: store, Endpoints: []wechat.DataCubeEndpoint{endpoint},
 		},
-		Layout:   &autolayout.Dispatcher{Store: store},
-		Reporter: &FeishuWebhookReporter{WebhookURL: "https://open.feishu.cn/open-apis/bot/v2/hook/test"},
+		Layout:     &autolayout.Dispatcher{Store: store},
+		LayoutPoll: schedule.Default.LayoutPoll,
+		Reporter:   &FeishuWebhookReporter{WebhookURL: "https://open.feishu.cn/open-apis/bot/v2/hook/test"},
 	}
 	status, err := runtime.MonitoringStatus(ctx, now)
 	if err != nil {
@@ -86,8 +88,9 @@ func TestMonitoringStatusFlagsStaleOfficialAndFreepublishSchedules(t *testing.T)
 		Analytics: &Collector{
 			Store: store, Endpoints: []wechat.DataCubeEndpoint{endpoint},
 		},
-		Layout:   &autolayout.Dispatcher{Store: store},
-		Reporter: &FeishuWebhookReporter{WebhookURL: "https://open.feishu.cn/open-apis/bot/v2/hook/test"},
+		Layout:     &autolayout.Dispatcher{Store: store},
+		LayoutPoll: schedule.Default.LayoutPoll,
+		Reporter:   &FeishuWebhookReporter{WebhookURL: "https://open.feishu.cn/open-apis/bot/v2/hook/test"},
 	}
 	status, err := runtime.MonitoringStatus(ctx, now)
 	if err != nil {
@@ -95,6 +98,39 @@ func TestMonitoringStatusFlagsStaleOfficialAndFreepublishSchedules(t *testing.T)
 	}
 	if status.Ready || len(status.StaleEndpoints) != 1 || len(status.StaleContentStreams) != 1 {
 		t.Fatalf("stopped schedules were not detected: %+v", status)
+	}
+}
+
+func TestFreepublishWatchdogFollowsLedgerPollInterval(t *testing.T) {
+	ctx := context.Background()
+	store, err := archive.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, wechat.ShanghaiLoc())
+	if err := store.MarkContentRecentSuccess(ctx, "freepublish", now.Add(-50*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &Runtime{
+		Store:      store,
+		Analytics:  &Collector{Store: store},
+		LayoutPoll: schedule.Every{Window: schedule.Default.LayoutPoll.Window, Interval: time.Hour},
+	}
+	status, err := runtime.MonitoringStatus(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.StaleContentStreams) != 0 {
+		t.Fatalf("hourly poll that ran 50 minutes ago is on time: %+v", status.StaleContentStreams)
+	}
+	runtime.LayoutPoll = schedule.Default.LayoutPoll
+	status, err = runtime.MonitoringStatus(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.StaleContentStreams) != 1 {
+		t.Fatalf("15-minute poll silent for 50 minutes must be stale: %+v", status.StaleContentStreams)
 	}
 }
 
@@ -124,8 +160,9 @@ func TestMonitoringStatusTreatsFreshQuotaLimitAsDiagnostic(t *testing.T) {
 		Analytics: &Collector{
 			Store: store, Endpoints: []wechat.DataCubeEndpoint{endpoint},
 		},
-		Layout:   &autolayout.Dispatcher{Store: store},
-		Reporter: &FeishuWebhookReporter{WebhookURL: "https://open.feishu.cn/open-apis/bot/v2/hook/test"},
+		Layout:     &autolayout.Dispatcher{Store: store},
+		LayoutPoll: schedule.Default.LayoutPoll,
+		Reporter:   &FeishuWebhookReporter{WebhookURL: "https://open.feishu.cn/open-apis/bot/v2/hook/test"},
 	}
 	status, err := runtime.MonitoringStatus(ctx, now)
 	if err != nil {

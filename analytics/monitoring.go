@@ -8,14 +8,12 @@ import (
 	"time"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
-	"github.com/garyzheng0714-lang/fbif-wechat-article/wechat"
 )
 
 const (
 	officialEndpointStaleAfter = 26 * time.Hour
 	officialDeferredStaleAfter = 2 * time.Hour
 	officialLayoutStaleAfter   = 20 * time.Minute
-	officialPublishedPollStale = 45 * time.Minute
 )
 
 type MonitoringStatus struct {
@@ -85,9 +83,10 @@ func (r *Runtime) MonitoringStatus(ctx context.Context, now time.Time) (*Monitor
 	for _, state := range contentStates {
 		contentByStream[state.Stream] = state
 	}
+	// 发文时段里超过 3 个轮询间隔没成功才算停摆；阈值和看守的时段都跟着总账本里的轮询时间走。
 	publishedMaxAge := officialEndpointStaleAfter
-	if withinPublishedWatchdogWindow(now) {
-		publishedMaxAge = officialPublishedPollStale
+	if pollStale := 3 * r.LayoutPoll.Interval; r.LayoutPoll.Covers(now.Add(-pollStale)) {
+		publishedMaxAge = pollStale
 	}
 	freepublish, ok := contentByStream["freepublish"]
 	if !ok || freepublish.LastRecentSuccessAt == 0 || now.Sub(time.UnixMilli(freepublish.LastRecentSuccessAt)) > publishedMaxAge {
@@ -162,11 +161,4 @@ func maxInt64(a, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-func withinPublishedWatchdogWindow(now time.Time) bool {
-	local := now.In(wechat.ShanghaiLoc())
-	start := time.Date(local.Year(), local.Month(), local.Day(), 9, 15, 0, 0, wechat.ShanghaiLoc())
-	end := time.Date(local.Year(), local.Month(), local.Day(), 19, 15, 0, 0, wechat.ShanghaiLoc())
-	return !local.Before(start) && !local.After(end)
 }

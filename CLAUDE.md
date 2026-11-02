@@ -16,11 +16,13 @@ FBIF 内容链路由**三个互相独立的系统**组成，各有各的代码�
 
 阅读、分享、粉丝等统计指标是 **T+1**：现行 `analytics/runtime.go` 每天 08:05（Asia/Shanghai）执行完整 D-1 采集，不需要高频刷新统计窗口。
 
-当天发布发现是另一条节奏：启用自动排版时，`analytics/runtime.go` 在 08:30–18:30 按 `AUTO_LAYOUT_POLL_INTERVAL_MINUTES`（默认 15）调用 `PollLayout`；它先通过 `Content.RefreshPublished` 请求微信官方 `freepublish/batchget` 最新页，再处理持久化 outbox。该轮询会消耗 `freepublish/batchget` 的独立接口额度，不是只扫本地库。
+当天发布发现是另一条节奏：启用自动排版时，`analytics/runtime.go` 默认在 08:30–18:30 每 15 分钟调用 `PollLayout`；它先通过 `Content.RefreshPublished` 请求微信官方 `freepublish/batchget` 最新页，再处理持久化 outbox。该轮询会消耗 `freepublish/batchget` 的独立接口额度，不是只扫本地库。
 
 旧直连飞书的 scheduler、媒体 worker、历史素材 worker 从未从 `main.go` 启动，已于 2026-11-03 删除。现行调度真值是 `main.go` 启动的 `analytics.Runtime`。
 
-Base 写回（`officialbase`）不定时轮询：`analytics.Runtime` 每轮写完归档调 `ArchiveChanged` 叫醒它，没有待写行时不调飞书；进程内兜底每 6 小时一轮。不要再加分钟级定时器。
+Base 写回（`officialbase`）不定时轮询：`analytics.Runtime` 每轮写完归档调 `ArchiveChanged` 叫醒它，没有待写行时不调飞书；进程内兜底默认每 6 小时一轮。不要再加分钟级定时器。
+
+上面三个时间（日采集时刻、发文轮询时段和间隔、写回兜底）都登记在 FBIF 中台总账本「定时任务和回调」，人在表里改「多久一次」，中台写进 `/etc/fbif-hub/env/wechat-sync.env`（用户 2026-11-03 定）。`schedule/schedule.go` 是唯一读这些变量的地方，默认值和接入前一样；不写死、不写进 `.env`、不另设别处改。本机队列（群发回调 outbox）靠写入时叫醒加到期定时器，不加秒级空转。
 
 `FoodTalks_Feed` 的 RSS 实时监控仍是独立系统；它与本项目的官方发布轮询可以先后发现同一文章，排版侧依靠 `source_key` 幂等去重。
 

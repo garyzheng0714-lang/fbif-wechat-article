@@ -347,6 +347,24 @@ func (s *Store) ListDuePublishEventDeliveries(ctx context.Context, now time.Time
 	return result, rows.Err()
 }
 
+// NextPublishEventDeliveryAt 是待投递行里最早该投的时刻；没有待投递行时 ok 为 false。
+func (s *Store) NextPublishEventDeliveryAt(ctx context.Context) (next time.Time, ok bool, err error) {
+	var due sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT MIN(next_attempt_at)
+		FROM official_publish_event_articles
+		WHERE status IN (?, ?)`,
+		PublishEventArticlePending,
+		PublishEventArticleFailed,
+	).Scan(&due); err != nil {
+		return time.Time{}, false, err
+	}
+	if !due.Valid {
+		return time.Time{}, false, nil
+	}
+	return time.UnixMilli(due.Int64), true, nil
+}
+
 func (s *Store) MarkPublishEventDelivered(ctx context.Context, eventKey string, articleIndex int, jobID int64, stage string, existing bool, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now()

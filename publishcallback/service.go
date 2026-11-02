@@ -28,6 +28,10 @@ import (
 const (
 	massSendJobFinish = "MASSSENDJOBFINISH"
 	maxCallbackBody   = 2 << 20
+
+	// 投递靠回调写入时叫醒、到期时刻的定时器；这两个只兜底。
+	idleRecheck  = time.Hour
+	errorBackoff = time.Minute
 )
 
 type URLSubmitter interface {
@@ -45,22 +49,21 @@ type Config struct {
 	AppID          string
 	Classifier     URLClassifier
 	RetryDelay     time.Duration
-	WorkerInterval time.Duration
 	BatchSize      int
 }
 
 type Service struct {
-	store          *archive.Store
-	submitter      URLSubmitter
-	classifier     URLClassifier
-	token          string
-	appID          string
-	aesKey         []byte
-	retryDelay     time.Duration
-	workerInterval time.Duration
-	batchSize      int
-	now            func() time.Time
-	runMu          sync.Mutex
+	store      *archive.Store
+	submitter  URLSubmitter
+	classifier URLClassifier
+	token      string
+	appID      string
+	aesKey     []byte
+	retryDelay time.Duration
+	batchSize  int
+	now        func() time.Time
+	runMu      sync.Mutex
+	wake       chan struct{}
 }
 
 type RunResult struct {
@@ -118,20 +121,17 @@ func New(store *archive.Store, submitter URLSubmitter, cfg Config) (*Service, er
 		return nil, fmt.Errorf("publish callback token is required")
 	}
 	service := &Service{
-		store:          store,
-		submitter:      submitter,
-		classifier:     cfg.Classifier,
-		token:          token,
-		appID:          strings.TrimSpace(cfg.AppID),
-		retryDelay:     cfg.RetryDelay,
-		workerInterval: cfg.WorkerInterval,
-		batchSize:      cfg.BatchSize,
+		store:      store,
+		submitter:  submitter,
+		classifier: cfg.Classifier,
+		token:      token,
+		appID:      strings.TrimSpace(cfg.AppID),
+		retryDelay: cfg.RetryDelay,
+		batchSize:  cfg.BatchSize,
+		wake:       make(chan struct{}, 1),
 	}
 	if service.retryDelay <= 0 {
 		service.retryDelay = 15 * time.Minute
-	}
-	if service.workerInterval <= 0 {
-		service.workerInterval = 5 * time.Second
 	}
 	if service.batchSize <= 0 {
 		service.batchSize = 20
@@ -316,6 +316,10 @@ func (s *Service) handleEvent(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SavePublishEvent(r.Context(), event, s.nowTime()); err != nil {
 		http.Error(w, "persist callback failed", http.StatusInternalServerError)
 		return
+	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
 	}
 	writeSuccess(w)
 }
@@ -511,27 +515,45 @@ func (s *Service) Start(stopCh <-chan struct{}) {
 		return
 	}
 	go func() {
-		run := func() {
-			result, err := s.RunOnce(context.Background())
-			if result != nil && result.Attempted > 0 {
-				log.Printf("[PublishCallback] attempted=%d delivered=%d failed=%d held=%d skipped_newspic=%d", result.Attempted, result.Delivered, result.Failed, result.Held, result.Newspic)
-			}
-			if err != nil {
-				log.Printf("[PublishCallback] worker completed with errors: %v", err)
-			}
-		}
-		run()
-		ticker := time.NewTicker(s.workerInterval)
-		defer ticker.Stop()
+		timer := time.NewTimer(0)
+		defer timer.Stop()
 		for {
 			select {
-			case <-ticker.C:
-				run()
+			case <-timer.C:
+			case <-s.wake:
 			case <-stopCh:
 				return
 			}
+			timer.Reset(s.deliverDue(context.Background()))
 		}
 	}()
+}
+
+// deliverDue 投一批到期的，返回多久后再投：这批满了马上接着投，否则等到最早那条该重试的时刻。
+func (s *Service) deliverDue(ctx context.Context) time.Duration {
+	result, err := s.RunOnce(ctx)
+	if result != nil && result.Attempted > 0 {
+		log.Printf("[PublishCallback] attempted=%d delivered=%d failed=%d held=%d skipped_newspic=%d", result.Attempted, result.Delivered, result.Failed, result.Held, result.Newspic)
+	}
+	if err != nil {
+		log.Printf("[PublishCallback] worker completed with errors: %v", err)
+	} else if result.Attempted >= s.batchSize {
+		return 0
+	}
+	wait := idleRecheck
+	next, ok, nextErr := s.store.NextPublishEventDeliveryAt(ctx)
+	switch {
+	case nextErr != nil:
+		log.Printf("[PublishCallback] read next delivery time: %v", nextErr)
+		wait = errorBackoff
+	case ok:
+		wait = min(max(next.Sub(s.nowTime()), 0), idleRecheck)
+	}
+	if err != nil && wait == 0 {
+		// 出错没记上的行还是到期的，别原地打转。
+		wait = errorBackoff
+	}
+	return wait
 }
 
 func (s *Service) nowTime() time.Time {

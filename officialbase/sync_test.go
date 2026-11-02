@@ -2,13 +2,20 @@ package officialbase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/garyzheng0714-lang/fbif-wechat-article/archive"
+	"github.com/garyzheng0714-lang/fbif-wechat-article/config"
 	"github.com/garyzheng0714-lang/fbif-wechat-article/feishu"
 )
 
@@ -106,6 +113,77 @@ func TestPayloadHashIsStableAcrossMapOrder(t *testing.T) {
 	}
 }
 
+// fakeBase answers every Feishu call the Base writer makes, so no test in this
+// package can reach the real open.feishu.cn, and counts calls by kind.
+type fakeBase struct {
+	mu      sync.Mutex
+	calls   map[string]int
+	created []string
+}
+
+func (f *fakeBase) RoundTrip(r *http.Request) (*http.Response, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	path := r.URL.Path
+	body := `{"code":0,"data":{}}`
+	kind := r.Method + " " + path[strings.LastIndex(path, "/"):]
+	switch {
+	case strings.HasSuffix(path, "/tenant_access_token/internal"):
+		kind = "token"
+		body = `{"code":0,"tenant_access_token":"t","expire":7200}`
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/tables"):
+		items := make([]string, len(datasets))
+		for index, dataset := range datasets {
+			items[index] = fmt.Sprintf(`{"name":%q,"table_id":"tbl%d"}`, dataset.TableName, index)
+		}
+		body = `{"code":0,"data":{"items":[` + strings.Join(items, ",") + `],"has_more":false}}`
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/fields"):
+		var index int
+		fmt.Sscanf(path[strings.Index(path, "/tables/tbl")+len("/tables/tbl"):], "%d", &index)
+		items := make([]string, 0, len(datasets[index].Fields))
+		for _, field := range datasets[index].Fields {
+			items = append(items, fmt.Sprintf(`{"field_name":%q}`, field.Name))
+		}
+		body = `{"code":0,"data":{"items":[` + strings.Join(items, ",") + `],"has_more":false}}`
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/records"):
+		body = `{"code":0,"data":{"items":[],"has_more":false}}`
+	case strings.HasSuffix(path, "/records/batch_create"):
+		var request struct {
+			Records []struct {
+				Fields map[string]interface{} `json:"fields"`
+			} `json:"records"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		ids := make([]string, len(request.Records))
+		for index, record := range request.Records {
+			key := fmt.Sprint(record.Fields["唯一键"])
+			f.created = append(f.created, key)
+			ids[index] = fmt.Sprintf(`{"record_id":"rec-%s"}`, key)
+		}
+		body = `{"code":0,"data":{"records":[` + strings.Join(ids, ",") + `]}}`
+	}
+	if kind != "token" {
+		f.calls[kind]++
+	}
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+}
+
+func (f *fakeBase) take() (map[string]int, []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	calls, created := f.calls, f.created
+	f.calls, f.created = map[string]int{}, nil
+	return calls, created
+}
+
+var base = &fakeBase{calls: map[string]int{}}
+
+func TestMain(m *testing.M) {
+	http.DefaultTransport = base
+	config.Env.FeishuAppID, config.Env.FeishuAppSecret, config.Env.FeishuBitableAppToken = "app", "secret", "base"
+	os.Exit(m.Run())
+}
+
 func openGatedSyncer(t *testing.T) (*Syncer, *archive.Store) {
 	t.Helper()
 	store, err := archive.Open(":memory:")
@@ -113,26 +191,14 @@ func openGatedSyncer(t *testing.T) (*Syncer, *archive.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	return &Syncer{Store: store, BeforeSync: func(context.Context) error { return nil }}, store
+	base.take()
+	return &Syncer{Store: store, BeforeSync: func(context.Context) error { return nil }, wake: make(chan struct{}, 1)}, store
 }
 
-func TestRoundWithNothingToWriteNeverCallsFeishu(t *testing.T) {
-	syncer, _ := openGatedSyncer(t)
-	result, err := syncer.Sync(context.Background())
-	if err != nil {
-		t.Fatalf("idle round must not reach Feishu (no credentials are configured in tests): %v", err)
-	}
-	for key, dataset := range result.Datasets {
-		if dataset != (DatasetResult{}) {
-			t.Fatalf("%s: idle round touched rows: %+v", key, dataset)
-		}
-	}
-}
-
-func TestRoundWithNewArchiveRowWritesToFeishu(t *testing.T) {
-	syncer, store := openGatedSyncer(t)
+func archiveFetch(t *testing.T, store *archive.Store, endpoint string) {
+	t.Helper()
 	if _, err := store.SaveFetch(context.Background(), archive.FetchRecord{
-		Endpoint:     "getusersummary",
+		Endpoint:     endpoint,
 		Category:     "user",
 		ResponseJSON: []byte(`{"list":[]}`),
 		HTTPStatus:   200,
@@ -140,9 +206,55 @@ func TestRoundWithNewArchiveRowWritesToFeishu(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := syncer.Sync(context.Background())
-	if err == nil || !strings.Contains(result.Errors[archive.BaseDatasetAPIFetches], "Feishu credentials not configured") {
-		t.Fatalf("a new archived row must be sent to Feishu, got %v", err)
+}
+
+func TestRoundWithNothingToWriteNeverCallsFeishu(t *testing.T) {
+	syncer, _ := openGatedSyncer(t)
+	if _, err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls, _ := base.take(); len(calls) != 0 {
+		t.Fatalf("idle round called Feishu: %v", calls)
+	}
+}
+
+func TestArchiveWriteWakesWorkerAndOnlyThenWritesBase(t *testing.T) {
+	syncer, store := openGatedSyncer(t)
+	settle := func() (map[string]int, []string) {
+		t.Helper()
+		time.Sleep(300 * time.Millisecond)
+		return base.take()
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go syncer.run(stop, time.Millisecond, 20*time.Millisecond, time.Hour)
+	if calls, _ := settle(); len(calls) != 0 {
+		t.Fatalf("startup round with an empty archive called Feishu: %v", calls)
+	}
+
+	archiveFetch(t, store, "getusersummary")
+	syncer.Wake()
+	calls, created := settle()
+	if len(created) == 0 || created[0] != "fetch:1" {
+		t.Fatalf("new archive row was not written to Base: created=%v calls=%v", created, calls)
+	}
+	if calls["GET /fields"] == 0 {
+		t.Fatalf("first write to a table must verify its fields: %v", calls)
+	}
+
+	syncer.Wake()
+	if calls, _ := settle(); len(calls) != 0 {
+		t.Fatalf("wake with nothing new called Feishu: %v", calls)
+	}
+
+	archiveFetch(t, store, "getusercumulate")
+	syncer.Wake()
+	calls, created = settle()
+	if len(created) != 1 || created[0] != "fetch:2" {
+		t.Fatalf("second archive row: created=%v calls=%v", created, calls)
+	}
+	if calls["GET /fields"] != 0 || calls["GET /tables"] != 0 || calls["GET /records"] != 0 {
+		t.Fatalf("known tables must be written without re-reading tables, fields or records: %v", calls)
 	}
 }
 

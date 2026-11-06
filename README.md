@@ -164,6 +164,9 @@ scripts/deploy-cloud-assistant.sh
 - `WECHAT_ENDPOINT_DAILY_QUOTA_LIMIT`，每个官方接口各自的日上限，默认且最高 `1000`；旧名 `WECHAT_DAILY_QUOTA_LIMIT` 仅兼容
 - `WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE`，每接口默认保留 `200`，因此默认可用预算为 `800`；也可用 `WECHAT_ENDPOINT_DAILY_QUOTA_RESERVE_PERCENT` 覆盖
 - `WECHAT_QUOTA_FILE`，按接口持久化预算计数的文件；写入失败会回滚本次内存预占并 fail closed
+- 官方额度实查（2026-11-06，[`openapi/quota/get`](https://developers.weixin.qq.com/doc/offiaccount/openApi/get_api_quota.html)）：`/datacube/getusersummary`、`/cgi-bin/freepublish/batchget` 每天 `1000`，`/cgi-bin/comment/list` 每天 `10000`；用得最多的 `/datacube/getarticletotaldetail` 查不到（返回 `76021 cgi_path not found`），它的真实上限未核实，程序按 `1000` 算
+- `getarticletotaldetail` 一次只查一个发表日，每篇只统计发表后 30 天，2025-11-01 以前没有数（[官方文档](https://developers.weixin.qq.com/doc/subscription/api/wedata/news/api_getarticletotaldetail.html)）；所以每天约 30 次花在刷新最近 30 个发表日上
+- 手动补某一天用 `POST /api/wechat/official/call`（`{"endpoint":"getarticletotaldetail","begin_date":"…","end_date":"…"}`，一个发表日一次）；`POST /api/wechat/official/collect` 会跑一整轮采集，别拿它补单日
 
 完整示例见 [.env.example](.env.example)。
 

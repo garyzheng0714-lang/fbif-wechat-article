@@ -193,7 +193,7 @@ func TestAuthorFillingStopsOnRepeatedFailuresAndAlertsOnce(t *testing.T) {
 	rows := base.table("tblArticles")
 	for _, mid := range []string{"1", "2", "3", "4", "5"} {
 		rows["rec"+mid] = map[string]interface{}{"内容标题": titled(mid, "1", "标题"+mid)}
-		pages.errs[articleLink(mid, "1")] = errors.New("WeChat asked for verification (环境异常)")
+		pages.errs[articleLink(mid, "1")] = errors.New("article page has no content")
 	}
 	var alerts []string
 	worker.Alert = func(message string) { alerts = append(alerts, message) }
@@ -219,5 +219,49 @@ func TestAuthorFillingStopsOnRepeatedFailuresAndAlertsOnce(t *testing.T) {
 	}
 	if done["rec5"] != archive.AuthorNone || done["rec4"] != archive.AuthorNone || done["rec3"] != archive.AuthorNone {
 		t.Fatalf("rows that failed 3 times should be given up, got %v", done)
+	}
+}
+
+// 微信要求验证挡的是服务器：整轮马上停、照样退避和告警，但不算到哪一行头上，挡完了这些行照常补。
+func TestVerificationPausesAuthorFillingWithoutGivingUpRows(t *testing.T) {
+	worker, base, pages := newAuthorWorker(t)
+	rows := base.table("tblArticles")
+	for _, mid := range []string{"1", "2", "3", "4", "5"} {
+		rows["rec"+mid] = map[string]interface{}{"内容标题": titled(mid, "1", "标题"+mid)}
+		pages.errs[articleLink(mid, "1")] = errVerification
+	}
+	var alerts []string
+	worker.Alert = func(message string) { alerts = append(alerts, message) }
+
+	var waits []time.Duration
+	for i := 0; i < 4; i++ {
+		waits = append(waits, worker.authorRound(context.Background(), 6*time.Hour))
+	}
+	if len(pages.fetched) != 4 {
+		t.Fatalf("a verification page should stop the round at once, fetched %d", len(pages.fetched))
+	}
+	if waits[0] != time.Minute || waits[1] != 2*time.Minute || waits[2] != 4*time.Minute || waits[3] != 8*time.Minute {
+		t.Fatalf("should back off from 1 minute, got %v", waits)
+	}
+	if len(alerts) != 1 || !strings.Contains(alerts[0], "环境异常") {
+		t.Fatalf("alert exactly once on the third failed round, got %v", alerts)
+	}
+	done, err := worker.Store.BizAuthorRecords(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(done) != 0 {
+		t.Fatalf("no row should be given up while WeChat blocks the server, got %v", done)
+	}
+
+	for _, mid := range []string{"1", "2", "3", "4", "5"} {
+		delete(pages.errs, articleLink(mid, "1"))
+		pages.pages[articleLink(mid, "1")] = originalPage(`<p>作者：Milo</p>`)
+	}
+	if wait := worker.authorRound(context.Background(), 6*time.Hour); wait != 0 {
+		t.Fatalf("round should succeed once WeChat lets us in, got wait %s", wait)
+	}
+	if got := rows["rec5"]["作者"]; got == nil {
+		t.Fatalf("rows should be filled after the block lifts, got %v", rows["rec5"])
 	}
 }

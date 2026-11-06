@@ -285,6 +285,9 @@ func pickAuthor(title string, page articlePage) (value, rule string) {
 
 var errPageGone = errors.New("article page is gone")
 
+// errVerification 是微信要求验证（环境异常）：挡的是这台服务器，不是哪一篇；整轮停下退避，不记到行上。
+var errVerification = errors.New("WeChat asked for verification (环境异常)")
+
 const pageUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 var pageClient = &http.Client{Timeout: 30 * time.Second}
@@ -319,7 +322,7 @@ func fetchArticlePage(ctx context.Context, link string) (string, error) {
 		}
 	}
 	if strings.Contains(page, "环境异常") {
-		return "", errors.New("WeChat asked for verification (环境异常)")
+		return "", errVerification
 	}
 	return "", errors.New("article page has no content")
 }
@@ -459,6 +462,11 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 					break
 				}
 				result.Failed++
+				if errors.Is(err, errVerification) {
+					stopErr = err
+					result.Left = len(tasks) - i
+					break
+				}
 				failuresInARow++
 				lastErr = err
 				if w.authorMisses == nil {

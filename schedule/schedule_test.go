@@ -140,3 +140,19 @@ func TestHubValuesAreRead(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestLastIsMostRecentTimeAtOrBeforeNow(t *testing.T) {
+	daily, _ := parseDaily("08:05,17:30")
+	cases := []struct{ now, want time.Time }{
+		{at(15, 8, 5, 0), at(15, 8, 5, 0)},
+		{at(15, 12, 0, 0), at(15, 8, 5, 0)},
+		{at(15, 17, 30, 0), at(15, 17, 30, 0)},
+		{at(15, 23, 0, 0), at(15, 17, 30, 0)},
+		{at(15, 8, 4, 59), at(14, 17, 30, 0)},
+	}
+	for _, tc := range cases {
+		if got := daily.Last(tc.now); !got.Equal(tc.want) {
+			t.Fatalf("now=%s last=%s want=%s", tc.now, got, tc.want)
+		}
+	}
+}

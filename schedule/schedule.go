@@ -148,6 +148,17 @@ func (d Daily) Next(now time.Time) time.Time {
 	return d[0].on(today.AddDate(0, 0, 1))
 }
 
+// Last 是 now 当时或之前最近的一个时刻；今天第一个时刻还没到就是昨天最后一个。
+func (d Daily) Last(now time.Time) time.Time {
+	today := midnight(now)
+	for i := len(d) - 1; i >= 0; i-- {
+		if at := d[i].on(today); !at.After(now) {
+			return at
+		}
+	}
+	return d[len(d)-1].on(today.AddDate(0, 0, -1))
+}
+
 // Begun 说今天第一个时刻到了没有。
 func (d Daily) Begun(now time.Time) bool { return !now.Before(d[0].on(midnight(now))) }
 

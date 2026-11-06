@@ -300,15 +300,7 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 					log.Printf("[AutoLayout] initial poll completed with errors: %v", layoutErr)
 				}
 			}
-			if r.Collection.Begun(initialNow) {
-				result, err := r.Run(context.Background())
-				if err != nil {
-					log.Printf("[OfficialCollector] Initial run completed with errors: %v", err)
-				}
-				r.signalDeferredRetry(result)
-			} else {
-				log.Printf("[OfficialCollector] Initial D-1 collection deferred until %s Asia/Shanghai", r.Collection[0])
-			}
+			r.initialCollection(initialNow)
 		case <-stopCh:
 			return
 		}
@@ -331,6 +323,29 @@ func (r *Runtime) Start(stopCh <-chan struct{}) {
 			}
 		}
 	}()
+}
+
+// initialCollection 是启动时补跑：今天第一个时刻没到就等；最近一个时刻那一轮已经跑完的不再补跑，
+// 免得每次重启都多花一整轮额度（2026-11-06 一天重启 17 次，文章数据接口用到 460 次）。
+func (r *Runtime) initialCollection(now time.Time) {
+	if !r.Collection.Begun(now) {
+		log.Printf("[OfficialCollector] Initial D-1 collection deferred until %s Asia/Shanghai", r.Collection[0])
+		return
+	}
+	slot := r.Collection.Last(now)
+	ran, err := r.Analytics.RanSince(context.Background(), slot)
+	if err != nil {
+		log.Printf("[OfficialCollector] 查不到 %s 那一轮跑没跑完，照旧补跑: %v", slot.Format("01-02 15:04"), err)
+	}
+	if ran {
+		log.Printf("[OfficialCollector] %s 那一轮已经跑完，重启不再补跑", slot.Format("01-02 15:04"))
+		return
+	}
+	result, err := r.Run(context.Background())
+	if err != nil {
+		log.Printf("[OfficialCollector] Initial run completed with errors: %v", err)
+	}
+	r.signalDeferredRetry(result)
 }
 
 func (r *Runtime) signalDeferredRetry(result *CombinedRunResult) {

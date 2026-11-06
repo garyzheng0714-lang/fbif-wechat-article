@@ -174,6 +174,11 @@ func (c *Collector) Run(ctx context.Context) (*RunResult, error) {
 		}
 	}
 
+	// Pass 2b: publish dates that left the 30-day window without their final day.
+	if result.Calls < maxCalls {
+		c.refetchMissedFinalDays(ctx, endpoints, yesterday, maxCalls, failedEndpoint, result, &runErrors)
+	}
+
 	// Pass 3: round-robin historical backfill. Each endpoint advances only
 	// after a successful, durably stored response.
 	for result.Calls < maxCalls {

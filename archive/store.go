@@ -32,7 +32,7 @@ func Open(path string) (*Store, error) {
 		}
 	}
 
-	// 服务在写库时，服务器上还会有别的进程打开同一个库（wechat-sync biz-card、collect-once）。
+	// 服务在写库时，服务器上还会有别的进程打开同一个库（wechat-sync collect-once）。
 	// busy_timeout 写进连接串，连接一打开就带上，迁移的第一条语句也排队等锁；
 	// _txlock=immediate 让写事务开头就拿写锁排队。默认的事务先读后升级成写，中间被别的进程写过，
 	// SQLite 直接报 database is locked、不等（2026-11-06 14:32 首轮采集因此丢了两条接口结果）。

@@ -605,7 +605,7 @@ func (w *Worker) syncBase(ctx context.Context) (*BaseResult, error) {
 	today := w.now().In(wechat.ShanghaiLoc()).Format("2006-01-02")
 	result := &BaseResult{}
 
-	articles, err := w.Store.BizArticlesAll(ctx, earliest(articleEndpoint), today)
+	articles, err := w.Store.BizArticles(ctx, earliest(articleEndpoint), today)
 	if err != nil {
 		return result, err
 	}

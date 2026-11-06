@@ -59,10 +59,6 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) > 2 && os.Args[1] == "biz-card" {
-		printBizCard(os.Args[2:])
-		return
-	}
 	if officialRuntime != nil {
 		callbackService, err := publishcallback.NewFromEnv(
 			officialRuntime.Store,
@@ -169,7 +165,7 @@ func bizRunHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if bizWorker == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "business data table and cards are not configured"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"success": false, "error": "business data table is not configured"})
 		return
 	}
 	result, err := bizWorker.Run(r.Context())
@@ -178,40 +174,6 @@ func bizRunHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "result": result})
-}
-
-// printBizCard 打印一张卡片的 JSON，不发送：wechat-sync biz-card daily 2026-11-05 / weekly 2026-10-27。
-func printBizCard(args []string) {
-	if officialRuntime == nil {
-		log.Fatal("official API collector disabled")
-	}
-	worker := &bizdata.Worker{
-		Store:          officialRuntime.Store,
-		BaseToken:      os.Getenv("BIZ_BASE_APP_TOKEN"),
-		ArticleTableID: os.Getenv("BIZ_BASE_ARTICLE_TABLE_ID"),
-	}
-	date := time.Now().In(wechat.ShanghaiLoc()).AddDate(0, 0, -1)
-	if len(args) > 1 {
-		parsed, err := time.ParseInLocation("2006-01-02", args[1], wechat.ShanghaiLoc())
-		if err != nil {
-			log.Fatalf("date must be YYYY-MM-DD: %v", err)
-		}
-		date = parsed
-	}
-	var card map[string]interface{}
-	var err error
-	switch args[0] {
-	case "daily":
-		card, err = worker.DailyCard(context.Background(), date)
-	case "weekly":
-		card, err = worker.WeeklyCard(context.Background(), date)
-	default:
-		log.Fatal("usage: wechat-sync biz-card daily|weekly [YYYY-MM-DD]")
-	}
-	if err != nil {
-		log.Fatal(err)
-	}
-	_ = json.NewEncoder(os.Stdout).Encode(card)
 }
 
 func configureRuntime() {

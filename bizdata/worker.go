@@ -2,7 +2,6 @@ package bizdata
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -14,16 +13,14 @@ import (
 	"github.com/garyzheng0714-lang/fbif-wechat-article/feishu"
 )
 
-// Worker 不定时轮询：归档写完由 analytics.Runtime 叫醒，合并 5 秒后跑一轮；
-// 一轮里先写表、再看要不要发卡片。没有要写的行、也没有该发的卡片时一次飞书接口都不调。
+// Worker 不定时轮询：归档写完由 analytics.Runtime 叫醒，合并 5 秒后写一轮表；
+// 没有要写的行时一次飞书接口都不调。
 // 兜底间隔和 Base 写回共用总账本那一行（OFFICIAL_BASE_SYNC_FALLBACK_SECONDS）。
 type Worker struct {
 	Store          *archive.Store
 	Base           BaseTarget
 	BaseToken      string
 	ArticleTableID string
-	ChatID         string
-	Send           func(chatID string, card interface{}, uuid string) (string, error)
 	// Alert 只在连续失败到第 3 次那一刻调一次。
 	Alert func(message string)
 	Now   func() time.Time
@@ -34,33 +31,26 @@ type Worker struct {
 }
 
 type RunResult struct {
-	Base    *BaseResult   `json:"base,omitempty"`
-	Reports *ReportResult `json:"reports,omitempty"`
+	Base *BaseResult `json:"base,omitempty"`
 }
 
-// NewFromEnv 读中台下发的 BIZ_BASE_APP_TOKEN、BIZ_BASE_ARTICLE_TABLE_ID、BIZ_REPORT_CHAT_ID。
-// 都没配时返回 nil，什么也不跑。
+// NewFromEnv 读中台下发的 BIZ_BASE_APP_TOKEN、BIZ_BASE_ARTICLE_TABLE_ID；缺一个就返回 nil，什么也不跑。
 func NewFromEnv(store *archive.Store) *Worker {
 	baseToken := strings.TrimSpace(os.Getenv("BIZ_BASE_APP_TOKEN"))
 	articleTable := strings.TrimSpace(os.Getenv("BIZ_BASE_ARTICLE_TABLE_ID"))
-	chatID := strings.TrimSpace(os.Getenv("BIZ_REPORT_CHAT_ID"))
-	if baseToken == "" && chatID == "" {
+	if baseToken == "" || articleTable == "" {
+		if baseToken != "" || articleTable != "" {
+			log.Printf("[BizData] BIZ_BASE_APP_TOKEN and BIZ_BASE_ARTICLE_TABLE_ID must both be set; table writes disabled")
+		}
 		return nil
 	}
-	worker := &Worker{
+	return &Worker{
 		Store:          store,
+		Base:           feishu.Base{AppToken: baseToken},
 		BaseToken:      baseToken,
 		ArticleTableID: articleTable,
-		ChatID:         chatID,
-		Send:           feishu.SendCard,
 		wake:           make(chan struct{}, 1),
 	}
-	if baseToken != "" && articleTable != "" {
-		worker.Base = feishu.Base{AppToken: baseToken}
-	} else if baseToken != "" {
-		log.Printf("[BizData] BIZ_BASE_ARTICLE_TABLE_ID is empty; table writes disabled")
-	}
-	return worker
 }
 
 func (w *Worker) now() time.Time {
@@ -80,19 +70,14 @@ func (w *Worker) Wake() {
 	}
 }
 
-// Run 跑一轮：先写表，再发该发的卡片。表写失败不挡卡片（卡片直接读 SQLite）。
+// Run 写一轮表。
 func (w *Worker) Run(ctx context.Context) (*RunResult, error) {
 	if !w.runMu.TryLock() {
 		return nil, fmt.Errorf("business data round is already running")
 	}
 	defer w.runMu.Unlock()
-	result := &RunResult{}
-	var baseErr, reportErr error
-	if w.Base != nil {
-		result.Base, baseErr = w.syncBase(ctx)
-	}
-	result.Reports, reportErr = w.sendReports(ctx)
-	return result, errors.Join(baseErr, reportErr)
+	base, err := w.syncBase(ctx)
+	return &RunResult{Base: base}, err
 }
 
 const (
@@ -105,7 +90,7 @@ func Start(stopCh <-chan struct{}, worker *Worker, fallback time.Duration) {
 		return
 	}
 	go worker.loop(stopCh, 20*time.Second, fallback)
-	log.Printf("[BizData] worker started: table=%t cards=%t, on archive change, fallback every %s", worker.Base != nil, worker.ChatID != "", fallback)
+	log.Printf("[BizData] worker started: on archive change, fallback every %s", fallback)
 }
 
 func (w *Worker) loop(stopCh <-chan struct{}, initialDelay, fallback time.Duration) {
@@ -151,7 +136,7 @@ func (w *Worker) round(fallback time.Duration) time.Duration {
 	w.failures++
 	log.Printf("[BizData] round failed (%d in a row): %v", w.failures, err)
 	if w.failures == 3 && w.Alert != nil {
-		w.Alert(fmt.Sprintf("公众号业务数据表格或日报卡片连续 3 次失败：%v", err))
+		w.Alert(fmt.Sprintf("公众号业务数据表格连续 3 次失败：%v", err))
 	}
 	backoff := firstRetry << (w.failures - 1)
 	if backoff > fallback || backoff <= 0 {
@@ -164,12 +149,5 @@ func logResult(result *RunResult) {
 	if result.Base != nil {
 		a, d := result.Base.Articles, result.Base.Days
 		log.Printf("[BizData] articles created=%d updated=%d deleted_in_base=%d adopted=%d; days created=%d updated=%d", a.Created, a.Updated, a.Skipped, a.Adopted, d.Created, d.Updated)
-	}
-	if result.Reports != nil {
-		if len(result.Reports.Sent) > 0 {
-			log.Printf("[BizData] cards sent: %v", result.Reports.Sent)
-		} else if result.Reports.Waiting != "" {
-			log.Printf("[BizData] cards waiting for %s data", result.Reports.Waiting)
-		}
 	}
 }

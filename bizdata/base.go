@@ -1,7 +1,7 @@
 // Package bizdata 把已经采到的公众号数据写进业务同事看的多维表格，并发数据汇报卡片。
 //
 // 和 officialbase 的区别：officialbase 是 13 张原始表的整库镜像，受历史覆盖审计门禁管；
-// 这里只写两张给人看的表（文章数据、每日数据）和两种卡片（日报、周报），
+// 这里只写两张给人看的表（文章数据、每日数据，都关联到「公众号」表）和两种卡片（日报、周报），
 // 用户 2026-11-06 定：单独写回，不受那道门禁，也不在表里写「全量」。
 package bizdata
 
@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,13 +28,19 @@ const (
 	datasetArticles = "biz_articles_v1"
 	datasetDays     = "biz_days_v1"
 
-	// 接管的「2026.3-2026.11」表从这天的文章开始；更早的在「2025.1-2026.3」表里，不碰。
-	articlesSince = "2026-03-23"
-	// getbizsummary 从这天起才有数据。
-	daysSince = "2025-11-01"
+	// 两张表都从微信新版接口最早有数的那天写起（见 wechat.DataCubeEndpointByName）；
+	// 更早的文章是用户导入的，接口拿不到，程序不碰。
+	articleEndpoint = "getarticletotaldetail"
+	dayEndpoint     = "getbizsummary"
 
 	dailyTableName  = "每日数据"
 	stateDailyTable = "table:daily"
+
+	// 「公众号」表一号一行，文章表、每日数据表的「公众号」列关联到它，按号筛选、分组。
+	accountTableName   = "公众号"
+	accountColumn      = "公众号"
+	stateAccountTable  = "table:account"
+	stateAccountPrefix = "account:"
 
 	// deletedInBase 记在 record_id 里，表示这一行在表格里被人删了：不再写、也不重建。
 	deletedInBase = "deleted"
@@ -47,6 +54,24 @@ type BaseTarget interface {
 	BatchUpdateByRecordID(tableID string, records []map[string]interface{}) error
 	EnsureFieldsExist(fields []feishu.FieldSpec, tableID string) error
 	CreateTable(name string, fields []feishu.FieldSpec) (string, error)
+	GetOrCreateTable(tableName string, primaryFieldName ...string) (string, error)
+}
+
+func earliest(endpoint string) string {
+	spec, _ := wechat.DataCubeEndpointByName(endpoint)
+	return spec.EarliestDate
+}
+
+func accountField(accountTableID string) feishu.FieldSpec {
+	return feishu.FieldSpec{Name: accountColumn, Type: feishu.FieldTypeLink, Property: map[string]interface{}{"table_id": accountTableID, "multiple": false}}
+}
+
+// withAccount 在要确保存在的列里加上关联「公众号」表的那一列；还不知道公众号表时不加。
+func withAccount(fields []feishu.FieldSpec, accountTableID string) []feishu.FieldSpec {
+	if accountTableID == "" {
+		return fields
+	}
+	return append(append([]feishu.FieldSpec{}, fields...), accountField(accountTableID))
 }
 
 func integer(name string) feishu.FieldSpec {
@@ -106,7 +131,8 @@ type row struct {
 	adjust func(current map[string]interface{}, update map[string]interface{})
 }
 
-func articleRows(articles []archive.BizArticle) []row {
+// articleRows 把文章变成要写的行；accounts 是 biz → 「公众号」表里那一行的 record_id。
+func articleRows(articles []archive.BizArticle, accounts map[string]string) []row {
 	rows := make([]row, 0, len(articles))
 	for _, article := range articles {
 		if article.StatDate == "" {
@@ -123,6 +149,9 @@ func articleRows(articles []archive.BizArticle) []row {
 			"点赞":    article.Like,
 			"收藏":    article.Collection,
 			"留言":    article.Comment,
+		}
+		if id := accounts[bizFromLink(article.URL)]; id != "" {
+			metrics[accountColumn] = []string{id}
 		}
 		create := map[string]interface{}{
 			"内容标题": article.Title,
@@ -153,7 +182,8 @@ func articleRows(articles []archive.BizArticle) []row {
 	return rows
 }
 
-func dayRows(days []archive.BizDay) []row {
+// dayRows 把每日数据变成要写的行；accountID 是本号在「公众号」表里那一行。
+func dayRows(days []archive.BizDay, accountID string) []row {
 	rows := make([]row, 0, len(days))
 	for _, day := range days {
 		date, err := time.ParseInLocation("2006-01-02", day.Date, wechat.ShanghaiLoc())
@@ -161,6 +191,9 @@ func dayRows(days []archive.BizDay) []row {
 			continue
 		}
 		fields := map[string]interface{}{"日期": date.UnixMilli()}
+		if accountID != "" {
+			fields[accountColumn] = []string{accountID}
+		}
 		if day.HasSummary {
 			fields["阅读人数"], fields["分享人数"], fields["在看"] = day.ReadUser, day.ShareUser, day.Zaikan
 			fields["点赞"], fields["留言"], fields["收藏"], fields["发文篇数"] = day.Like, day.Comment, day.Collection, day.SendPages
@@ -184,7 +217,41 @@ func dateNumber(date string) int64 {
 	return n
 }
 
-var articleLinkPattern = regexp.MustCompile(`[?&]mid=(\d+)&idx=(\d+)`)
+var (
+	articleLinkPattern = regexp.MustCompile(`[?&]mid=(\d+)&idx=(\d+)`)
+	bizPattern         = regexp.MustCompile(`[?&]__biz=([^&#]+)`)
+)
+
+// bizFromLink 从公众号文章链接里取 __biz，认是哪个号。
+func bizFromLink(link string) string {
+	match := bizPattern.FindStringSubmatch(link)
+	if match == nil {
+		return ""
+	}
+	biz, err := url.QueryUnescape(match[1])
+	if err != nil {
+		return match[1]
+	}
+	return biz
+}
+
+// textValue 读回一个文本格子：飞书回的是分段数组，测试和老数据里也可能是字符串。
+func textValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []interface{}:
+		var text strings.Builder
+		for _, segment := range typed {
+			if part, ok := segment.(map[string]interface{}); ok {
+				piece, _ := part["text"].(string)
+				text.WriteString(piece)
+			}
+		}
+		return strings.TrimSpace(text.String())
+	}
+	return ""
+}
 
 // msgIDFromLink 从公众号文章链接里取 mid 和 idx，拼成微信数据接口用的 msgid。
 func msgIDFromLink(value interface{}) string {
@@ -316,34 +383,125 @@ func (w *Worker) syncTable(ctx context.Context, dataset, tableID string, fields 
 	return result, nil
 }
 
-// adoptArticleTable 第一次接管已有文章表：按链接把表里每一行和文章对上，之后只按 record_id 写。
-func (w *Worker) adoptArticleTable(ctx context.Context) (adopted, duplicates int, err error) {
-	count, err := w.Store.BaseRecordCount(ctx, datasetArticles)
-	if err != nil || count > 0 {
+// adoptByLink 把表里已有、还没记下 record_id 的文章行按链接（mid+idx）认领过来，之后只按 record_id 写。
+// 只在有文章还没对上行时才读表：第一次接管、老表搬进来的、有人手贴的行都按这条认领，不建重复的行。
+// 记成「被人删了」的文章不算没对上，删了就不再认领、不重建。
+func (w *Worker) adoptByLink(ctx context.Context, rows []row) (adopted, duplicates int, err error) {
+	mapped, err := w.Store.BaseRecords(ctx, datasetArticles)
+	if err != nil {
 		return 0, 0, err
+	}
+	unmapped := make(map[string]bool)
+	for _, r := range rows {
+		if record, ok := mapped[r.key]; !ok || record.RecordID == "" {
+			unmapped[r.key] = true
+		}
+	}
+	if len(unmapped) == 0 {
+		return 0, 0, nil
+	}
+	taken := make(map[string]bool, len(mapped))
+	for _, record := range mapped {
+		taken[record.RecordID] = true
 	}
 	records, err := w.Base.SearchRecords(w.ArticleTableID, []string{"内容url"})
 	if err != nil {
 		return 0, 0, fmt.Errorf("read article table: %w", err)
 	}
-	seen := make(map[string]bool, len(records))
 	for _, record := range records {
 		msgID := msgIDFromLink(record.Fields["内容url"])
-		if msgID == "" {
+		if !unmapped[msgID] || taken[record.RecordID] {
 			continue
 		}
-		if seen[msgID] {
+		if mapped[msgID].RecordID != "" {
 			duplicates++
 			continue
 		}
-		seen[msgID] = true
 		if err := w.Store.SeedBaseRecord(ctx, datasetArticles, msgID, record.RecordID); err != nil {
 			return adopted, duplicates, err
 		}
+		mapped[msgID] = archive.BaseRecord{RecordID: record.RecordID}
 		adopted++
 	}
-	log.Printf("[BizData] adopted article table %s: %d rows matched by link, %d duplicate links left alone", w.ArticleTableID, adopted, duplicates)
+	if adopted > 0 || duplicates > 0 {
+		log.Printf("[BizData] article table %s: adopted %d rows by link, %d duplicate links left alone", w.ArticleTableID, adopted, duplicates)
+	}
 	return adopted, duplicates, nil
+}
+
+// accountLinks 找到每个 biz 在「公众号」表里那一行：先用本地记下的，没有才读表；
+// 表里也没有就建一行，只填 biz，名称留给人填（程序拿不到号的正式名称，不瞎写）。
+// 返回 biz → record_id 和公众号表的 table_id；bizs 为空时不调飞书。
+func (w *Worker) accountLinks(ctx context.Context, bizs []string) (map[string]string, string, error) {
+	links := make(map[string]string, len(bizs))
+	tableID, err := w.Store.BizState(ctx, stateAccountTable)
+	if err != nil || len(bizs) == 0 {
+		return links, tableID, err
+	}
+	var missing []string
+	for _, biz := range bizs {
+		id, err := w.Store.BizState(ctx, stateAccountPrefix+biz)
+		if err != nil {
+			return nil, "", err
+		}
+		if id == "" {
+			missing = append(missing, biz)
+		}
+		links[biz] = id
+	}
+	if len(missing) == 0 && tableID != "" {
+		return links, tableID, nil
+	}
+	if tableID == "" {
+		if tableID, err = w.Base.GetOrCreateTable(accountTableName, "名称"); err != nil {
+			return nil, "", fmt.Errorf("find %s table: %w", accountTableName, err)
+		}
+		if err := w.Base.EnsureFieldsExist([]feishu.FieldSpec{{Name: "biz", Type: feishu.FieldTypeText}}, tableID); err != nil {
+			return nil, "", fmt.Errorf("ensure %s fields: %w", accountTableName, err)
+		}
+		if err := w.Store.SetBizState(ctx, stateAccountTable, tableID, w.now()); err != nil {
+			return nil, "", err
+		}
+	}
+	records, err := w.Base.SearchRecords(tableID, []string{"biz"})
+	if err != nil {
+		return nil, "", fmt.Errorf("read %s table: %w", accountTableName, err)
+	}
+	existing := make(map[string]string, len(records))
+	for _, record := range records {
+		if biz := textValue(record.Fields["biz"]); biz != "" && existing[biz] == "" {
+			existing[biz] = record.RecordID
+		}
+	}
+	for _, biz := range missing {
+		id := existing[biz]
+		if id == "" {
+			ids, err := w.Base.BatchCreateByRecordFieldsWithIDs(tableID, []map[string]interface{}{{"fields": map[string]interface{}{"biz": biz}}})
+			if err != nil || len(ids) != 1 {
+				return nil, "", fmt.Errorf("create %s row for %s: %v", accountTableName, biz, err)
+			}
+			id = ids[0]
+			log.Printf("[BizData] added %s row %s for biz %s; its 名称 is left for a person to fill", accountTableName, id, biz)
+		}
+		if err := w.Store.SetBizState(ctx, stateAccountPrefix+biz, id, w.now()); err != nil {
+			return nil, "", err
+		}
+		links[biz] = id
+	}
+	return links, tableID, nil
+}
+
+// articleBizs 是文章链接里出现的号，最后一个是最近发文的号（每日数据记在它名下）。
+func articleBizs(articles []archive.BizArticle) []string {
+	var bizs []string
+	seen := make(map[string]bool)
+	for i := len(articles) - 1; i >= 0; i-- {
+		if biz := bizFromLink(articles[i].URL); biz != "" && !seen[biz] {
+			seen[biz] = true
+			bizs = append([]string{biz}, bizs...)
+		}
+	}
+	return bizs
 }
 
 func (w *Worker) dailyTableID(ctx context.Context) (string, error) {
@@ -367,25 +525,35 @@ func (w *Worker) syncBase(ctx context.Context) (*BaseResult, error) {
 	today := w.now().In(wechat.ShanghaiLoc()).Format("2006-01-02")
 	result := &BaseResult{}
 
-	adopted, duplicates, err := w.adoptArticleTable(ctx)
+	articles, err := w.Store.BizArticles(ctx, earliest(articleEndpoint), today)
 	if err != nil {
 		return result, err
 	}
-	articles, err := w.Store.BizArticles(ctx, articlesSince, today)
+	bizs := articleBizs(articles)
+	accounts, accountTable, err := w.accountLinks(ctx, bizs)
 	if err != nil {
 		return result, err
 	}
-	result.Articles, err = w.syncTable(ctx, datasetArticles, w.ArticleTableID, articleFields, articleRows(articles))
+	rows := articleRows(articles, accounts)
+	adopted, duplicates, err := w.adoptByLink(ctx, rows)
+	if err != nil {
+		return result, err
+	}
+	result.Articles, err = w.syncTable(ctx, datasetArticles, w.ArticleTableID, withAccount(articleFields, accountTable), rows)
 	result.Articles.Adopted, result.Articles.Duplicates = adopted, duplicates
 	if err != nil {
 		return result, fmt.Errorf("article table: %w", err)
 	}
 
-	days, err := w.Store.BizDays(ctx, daysSince, today)
+	days, err := w.Store.BizDays(ctx, earliest(dayEndpoint), today)
 	if err != nil {
 		return result, err
 	}
-	dayRows := dayRows(days)
+	ownAccount := ""
+	if len(bizs) > 0 {
+		ownAccount = accounts[bizs[len(bizs)-1]]
+	}
+	dayRows := dayRows(days, ownAccount)
 	if len(dayRows) == 0 {
 		return result, nil
 	}
@@ -393,7 +561,7 @@ func (w *Worker) syncBase(ctx context.Context) (*BaseResult, error) {
 	if err != nil {
 		return result, err
 	}
-	result.Days, err = w.syncTable(ctx, datasetDays, tableID, dayFields, dayRows)
+	result.Days, err = w.syncTable(ctx, datasetDays, tableID, withAccount(dayFields, accountTable), dayRows)
 	if err != nil {
 		return result, fmt.Errorf("daily table: %w", err)
 	}

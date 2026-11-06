@@ -25,6 +25,7 @@ const (
 	FieldTypeNumber   = 2
 	FieldTypeDatetime = 5
 	FieldTypeURL      = 15
+	FieldTypeLink     = 18 // 单向关联，写入值是 record_id 数组
 )
 
 const (

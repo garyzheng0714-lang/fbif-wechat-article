@@ -187,7 +187,7 @@ func TestAdoptsExistingTableUpdatesOnlyMetricsAndLeavesHumanColumns(t *testing.T
 		article("300_1", "2026-06-12", 0, stat("2026-07-11", 9000, 0, 0)),
 		article("400_1", "2026-06-12", 1, stat("2026-07-11", 500, 0, 0)), // 只发表不群发，不进表
 	)
-	save(t, store, "getarticletotaldetail", "2026-03-01", article("500_1", "2026-03-01", 0, stat("2026-03-02", 1, 0, 0))) // 早于接管范围
+	save(t, store, "getarticletotaldetail", "2025-10-31", article("500_1", "2025-10-31", 0, stat("2025-11-01", 1, 0, 0))) // 早于接口最早有数的那天
 
 	result, err := worker.syncBase(context.Background())
 	if err != nil {

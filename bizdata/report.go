@@ -118,13 +118,13 @@ type articleColumn struct {
 }
 
 var (
-	colTitle   = articleColumn{"title", "文章", "lark_md", "46%", func(a archive.BizArticle) interface{} { return articleLink(a) }}
-	colDate    = articleColumn{"date", "发表", "text", "auto", func(a archive.BizArticle) interface{} { return a.PublishDate[5:] }}
-	colRead    = articleColumn{"read", "阅读", "number", "auto", func(a archive.BizArticle) interface{} { return a.ReadUser }}
-	colShare   = articleColumn{"share", "分享", "number", "auto", func(a archive.BizArticle) interface{} { return a.ShareUser }}
-	colZaikan  = articleColumn{"zaikan", "在看", "number", "auto", func(a archive.BizArticle) interface{} { return a.Zaikan }}
-	colFinish  = articleColumn{"finish", "完成率", "text", "auto", func(a archive.BizArticle) interface{} { return percent(a.FinishRate) }}
-	colReadSub = articleColumn{"subscribe", "关注", "number", "auto", func(a archive.BizArticle) interface{} { return a.Subscribe }}
+	colTitle   = articleColumn{"title", "文章", "lark_md", "auto", func(a archive.BizArticle) interface{} { return articleLink(a) }}
+	colDate    = articleColumn{"date", "发表", "text", "80px", func(a archive.BizArticle) interface{} { return a.PublishDate[5:] }}
+	colRead    = articleColumn{"read", "阅读", "number", "80px", func(a archive.BizArticle) interface{} { return a.ReadUser }}
+	colShare   = articleColumn{"share", "分享", "number", "80px", func(a archive.BizArticle) interface{} { return a.ShareUser }}
+	colZaikan  = articleColumn{"zaikan", "在看", "number", "80px", func(a archive.BizArticle) interface{} { return a.Zaikan }}
+	colFinish  = articleColumn{"finish", "完成率", "text", "80px", func(a archive.BizArticle) interface{} { return percent(a.FinishRate) }}
+	colReadSub = articleColumn{"subscribe", "关注", "number", "80px", func(a archive.BizArticle) interface{} { return a.Subscribe }}
 )
 
 func articleTable(articles []archive.BizArticle, columns ...articleColumn) map[string]interface{} {
@@ -160,7 +160,7 @@ func articleTable(articles []archive.BizArticle, columns ...articleColumn) map[s
 		pageSize = 1
 	}
 	return map[string]interface{}{
-		"tag": "table", "page_size": pageSize, "row_height": "auto", "row_max_height": "64px",
+		"tag": "table", "page_size": pageSize, "row_height": "auto",
 		"freeze_first_column": true,
 		"header_style": map[string]interface{}{
 			"text_align": "left", "text_size": "normal", "background_style": "grey", "text_color": "grey", "bold": true, "lines": 1,
@@ -186,7 +186,7 @@ func (w *Worker) card(title, template string, elements []interface{}) map[string
 	}
 	return map[string]interface{}{
 		"schema": "2.0",
-		"config": map[string]interface{}{"summary": map[string]interface{}{"content": title}},
+		"config": map[string]interface{}{"width_mode": "fill", "summary": map[string]interface{}{"content": title}},
 		"header": map[string]interface{}{
 			"title":    map[string]interface{}{"tag": "plain_text", "content": title},
 			"template": template,

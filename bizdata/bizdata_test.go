@@ -383,6 +383,33 @@ func TestWeeklyCardOnlyOnMonday(t *testing.T) {
 	}
 }
 
+// 2026-11-06 预览周报：去年同一周只有两天采到阅读（getbizsummary 从 2025-11-01 才有），关注数据却七天都有，
+// 按「有数据的天数」算成满 7 天，拿两天的阅读去比一周，年同比显示 ↑293%。比的那周要 7 天阅读都在才比。
+func TestWeeklyCompareNeedsSevenDaysOfReads(t *testing.T) {
+	worker, store, _ := newWorker(t)
+	for day := 2; day <= 8; day++ {
+		seedDay(t, store, fmt.Sprintf("2026-11-%02d", day), 12000, 3)
+	}
+	for day := 3; day <= 9; day++ {
+		date := fmt.Sprintf("2025-11-%02d", day)
+		save(t, store, "getusersummary", date, map[string]interface{}{"ref_date": date, "user_source": 0, "new_user": 5, "cancel_user": 1})
+		if day >= 8 {
+			seedDay(t, store, date, 6000, 3)
+		}
+	}
+	card, err := worker.WeeklyCard(context.Background(), time.Date(2026, 11, 2, 0, 0, 0, 0, wechat.ShanghaiLoc()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(card)
+	text := unescapeJSON(encoded)
+	for _, want := range []string{"年同比 —", "周环比 —", "84,000"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("card missing %q: %s", want, text)
+		}
+	}
+}
+
 func TestAlertsOnceOnThirdFailureAndBacksOff(t *testing.T) {
 	worker, store, base := newWorker(t)
 	base.fail = errors.New("feishu 99991663")

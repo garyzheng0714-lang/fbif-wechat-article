@@ -308,18 +308,22 @@ func (w *Worker) DailyCard(ctx context.Context, date time.Time) (map[string]inte
 
 type weekTotals struct {
 	read, share, newUser, cancelUser int64
-	days                             int
+	days                             int // 有账号阅读（getbizsummary）的天数
 }
 
+// sumWeek 只把有阅读数据的日子算进 days：关注数据比阅读早有好多年（getbizsummary 2025-11-01 才有），
+// 只采到关注的日子要是也算一天，两天的阅读会被当成一整周去比（2026-11-06 预览出过年同比 ↑293%）。
 func sumWeek(days []archive.BizDay, from, to string) weekTotals {
 	var totals weekTotals
 	for _, day := range days {
 		if day.Date < from || day.Date > to {
 			continue
 		}
-		totals.days++
-		totals.read += day.ReadUser
-		totals.share += day.ShareUser
+		if day.HasSummary {
+			totals.days++
+			totals.read += day.ReadUser
+			totals.share += day.ShareUser
+		}
 		totals.newUser += day.NewUser
 		totals.cancelUser += day.CancelUser
 	}

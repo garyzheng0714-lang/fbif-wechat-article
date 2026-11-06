@@ -32,7 +32,11 @@ func Open(path string) (*Store, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// 服务在写库时，服务器上还会有别的进程打开同一个库（wechat-sync biz-card、collect-once）。
+	// busy_timeout 写进连接串，连接一打开就带上，迁移的第一条语句也排队等锁；
+	// _txlock=immediate 让写事务开头就拿写锁排队。默认的事务先读后升级成写，中间被别的进程写过，
+	// SQLite 直接报 database is locked、不等（2026-11-06 14:32 首轮采集因此丢了两条接口结果）。
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open analytics database: %w", err)
 	}
@@ -70,7 +74,6 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	statements := []string{
-		`PRAGMA busy_timeout = 10000`,
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA synchronous = NORMAL`,
 		`CREATE TABLE IF NOT EXISTS official_api_fetches (

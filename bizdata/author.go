@@ -22,6 +22,8 @@ import (
 // 依据按顺序：
 //  1. 标题认得出的栏目：创新周报、短视频、百强榜、FBIF 活动；
 //  2. 转载文章（网页 copyright_stat=2）写原公众号名，照网页原样（用户定：统一用公众号原名）；
+//     转载卡片上的名字是转载那天的，号改过名就会有两种写法，所以按网页里的公众号编号（source_username）认号，
+//     同一个号沿用表里已经写过的名字，一个号只有一种写法；
 //  3. 没声明原创的写正文里的「来源：」；
 //  4. 正文开头或结尾的「作者：/撰文：/文：」，没有再看「编辑：」，署名按人工习惯归类（bylineLabels）；
 //  5. 都没有就留空。
@@ -37,7 +39,7 @@ const (
 	authorMaxFailuresInARow = 3
 )
 
-var fbifEventTitle = regexp.MustCompile(`(?i)确认参加|确认参展|参展|议程|开幕|倒计时|FBIF ?20\d\d|食品创新展|高层确认|等企业|wow ?food|分享实录`)
+var fbifEventTitle = regexp.MustCompile(`(?i)确认参加|确认参展|参展|议程|开幕|倒计时|FBIF ?20\d\d|食品创新展|高层确认|等企业|wow ?food|wow ?食品|分享实录`)
 
 // authorFromTitle 认标题里的固定栏目，和表里人工的填法一致。
 func authorFromTitle(title string) string {
@@ -77,13 +79,15 @@ func bylineLabel(name string) string {
 
 type articlePage struct {
 	Copyright string // copyright_stat：1 原创，2 转载，0 或空是没声明
-	Reprint   string // 转载来源的公众号名
+	Reprint   string // 转载来源的公众号名（转载那天的名字）
+	Source    string // 转载来源的公众号编号 gh_…，改名也不变
 	Body      string // 正文纯文本
 }
 
 var (
 	copyrightPattern = regexp.MustCompile(`copyright_stat\s*[:=]\s*['"]?(\d)`)
 	reprintPattern   = regexp.MustCompile(`class="original_primary_nickname">([^<]+)<`)
+	sourcePattern    = regexp.MustCompile(`source_username\s*[:=]\s*['"](gh_\w+)['"]`)
 	noencodePattern  = regexp.MustCompile(`content_noencode:\s*'((?:[^'\\]|\\.)*)'`)
 	scriptPattern    = regexp.MustCompile(`(?s)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>`)
 	breakPattern     = regexp.MustCompile(`<br\s*/?>|</p>|</section>|</div>|</h\d>`)
@@ -91,7 +95,7 @@ var (
 	spacePattern     = regexp.MustCompile("[ \t 　​]+")
 	blankLinePattern = regexp.MustCompile(`\n\s*\n+`)
 	// bylinePattern 认「作者：Kiki」「文｜Dudu」「编辑：Riri」这类署名。
-	bylinePattern = regexp.MustCompile(`(?m)(?:^|[（(\s])(编辑|作者|撰文|文|整理|责编|采写|文字|来源)\s*[：:|｜丨/]\s*([A-Za-z\p{Han}·'’ ]{1,24}?)\s*(?:$|[）)，,。；;|｜丨/])`)
+	bylinePattern = regexp.MustCompile(`(?m)(?:^|[（(\s])(编辑|作者|撰文|文|整理|责编|采写|文字|来源)\s*[：:|｜丨/]\s*([A-Za-z\p{Han}·'’ ]{1,24}?)\s*(?:$|[（(）)，,。；;|｜丨/])`)
 )
 
 func parseArticlePage(page string) articlePage {
@@ -101,6 +105,9 @@ func parseArticlePage(page string) articlePage {
 	}
 	if match := reprintPattern.FindStringSubmatch(page); match != nil {
 		parsed.Reprint = strings.TrimSpace(html.UnescapeString(match[1]))
+	}
+	if match := sourcePattern.FindStringSubmatch(page); match != nil {
+		parsed.Source = match[1]
 	}
 	parsed.Body = pageBody(page)
 	return parsed
@@ -181,29 +188,48 @@ func bylines(text string) []byline {
 	return found
 }
 
-// firstByline 按顺序找第一个角色对得上的署名；自家号的名字不算（那不是作者）。
+// bylineName 去掉署名后面跟的自家头衔：「Mote莫特 FBIF创始人」只取「Mote莫特」；
+// 只剩自家号名（「FBIF食品饮料创新」）的不算作者。
+func bylineName(name string) string {
+	if at := strings.Index(strings.ToLower(name), "fbif"); at >= 0 {
+		name = name[:at]
+	}
+	return strings.TrimSpace(name)
+}
+
+// firstByline 按顺序找第一个角色对得上的署名。
 func firstByline(found []byline, roles ...string) string {
 	for _, b := range found {
-		if b.Name == "" || strings.Contains(strings.ToLower(b.Name), "fbif") {
+		name := bylineName(b.Name)
+		if name == "" {
 			continue
 		}
 		for _, role := range roles {
 			if b.Role == role {
-				return b.Name
+				return name
 			}
 		}
 	}
 	return ""
 }
 
-// signatures 是开头 400 字里的前两个署名，和结尾 700 字里的最后三个署名（从后往前）。
+// signatures 是开头约 400 字里的前两个署名，和结尾约 700 字里的最后三个署名（从后往前）。
+// 两段都按整行切，不把「作者：Milo」切成「作者：Mi」。
 func (p articlePage) signatures() (head, tail []byline) {
 	body := []rune(p.Body)
-	head = bylines(string(body[:min(len(body), 400)]))
+	headEnd := min(len(body), 400)
+	for headEnd < len(body) && body[headEnd-1] != '\n' {
+		headEnd++
+	}
+	head = bylines(string(body[:headEnd]))
 	if len(head) > 2 {
 		head = head[:2]
 	}
-	tail = bylines(string(body[max(0, len(body)-700):]))
+	tailStart := max(0, len(body)-700)
+	for tailStart > 0 && body[tailStart-1] != '\n' {
+		tailStart--
+	}
+	tail = bylines(string(body[tailStart:]))
 	if len(tail) > 3 {
 		tail = tail[len(tail)-3:]
 	}
@@ -316,6 +342,7 @@ type authorFill struct {
 	task        authorTask
 	value, rule string
 	status      string
+	source      string // 转载来源的公众号编号
 }
 
 // cellText 读回一个格子的文字：单选回的是字符串，文本回的是分段数组。
@@ -377,6 +404,10 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 	if err != nil {
 		return result, err
 	}
+	accountNames, err := w.Store.BizAuthorSourceNames(ctx)
+	if err != nil {
+		return result, err
+	}
 	records, err := w.Base.SearchRecords(w.ArticleTableID, []string{"内容标题", authorColumn})
 	if err != nil {
 		return result, fmt.Errorf("read article table: %w", err)
@@ -392,7 +423,7 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 			continue // 没有文章链接的行读不了网页
 		}
 		if cellText(record.Fields[authorColumn]) != "" {
-			if err := w.Store.SaveBizAuthor(ctx, record.RecordID, match[1]+"_"+match[2], archive.AuthorKept, "", "", w.now()); err != nil {
+			if err := w.Store.SaveBizAuthor(ctx, record.RecordID, match[1]+"_"+match[2], archive.AuthorKept, "", "", "", w.now()); err != nil {
 				return result, err
 			}
 			result.Kept++
@@ -447,6 +478,13 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 			}
 			failuresInARow = 0
 			pagesRead++
+			if fill.source != "" && fill.value != "" {
+				if name, ok := accountNames[fill.source]; ok {
+					fill.value = name // 同一个号沿用已经写过的名字
+				} else {
+					accountNames[fill.source] = fill.value
+				}
+			}
 			pages[task.msgID] = fill
 		}
 		fill.task = task
@@ -482,11 +520,16 @@ func (w *Worker) findAuthor(ctx context.Context, task authorTask) (authorFill, e
 	if err != nil {
 		return authorFill{}, err
 	}
-	value, rule := pickAuthor(task.title, parseArticlePage(page))
+	parsed := parseArticlePage(page)
+	value, rule := pickAuthor(task.title, parsed)
 	if value == "" {
 		return authorFill{rule: rule, status: archive.AuthorNone}, nil
 	}
-	return authorFill{value: value, rule: rule, status: archive.AuthorWritten}, nil
+	fill := authorFill{value: value, rule: rule, status: archive.AuthorWritten}
+	if rule == "转载" {
+		fill.source = parsed.Source
+	}
+	return fill, nil
 }
 
 // writeAuthors 写一批：先读回这些格子，还空着才写；表里被删了的行记成 gone。
@@ -535,7 +578,7 @@ func (w *Worker) writeAuthors(ctx context.Context, batch []authorFill, result *A
 		}
 	}
 	for _, fill := range batch {
-		if err := w.Store.SaveBizAuthor(ctx, fill.task.recordID, fill.task.msgID, fill.status, fill.value, fill.rule, w.now()); err != nil {
+		if err := w.Store.SaveBizAuthor(ctx, fill.task.recordID, fill.task.msgID, fill.status, fill.value, fill.rule, fill.source, w.now()); err != nil {
 			return err
 		}
 		switch fill.status {

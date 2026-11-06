@@ -313,6 +313,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			status TEXT NOT NULL,
 			value TEXT NOT NULL DEFAULT '',
 			rule TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
 			checked_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS official_comments (
@@ -796,6 +797,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "official_content_state", "last_recent_success_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "official_biz_authors", "source", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `

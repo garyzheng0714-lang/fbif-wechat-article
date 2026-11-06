@@ -16,7 +16,7 @@ func originalPage(body string) string {
 		body + `</div><script>var x=1;</script>`
 }
 
-const reprintPage = `<script>window.cgiData={copyright_stat: '2' * 1};</script>
+const reprintPage = `<script>window.cgiData={copyright_stat: '2' * 1, source_username: 'gh_90bc6f3429f4'};</script>
 <span class="original_primary_nickname">Gooods好味司</span>
 <div id="js_content"><p>以下文章来源于 Gooods好味司</p><p>作者：某某</p></div><script></script>`
 
@@ -25,6 +25,7 @@ func TestPickAuthorFollowsRuleOrder(t *testing.T) {
 		name, title, page, want, rule string
 	}{
 		{"标题栏目优先", "FBIF创新周报｜本周新品", originalPage(`<p>编辑：Kiki</p>`), "创新周报", "标题"},
+		{"自家活动标题", "Wow 食品探索家来了", originalPage(`<p>编辑：Kiki</p>`), "FBIF活动", "标题"},
 		{"转载写原公众号名", "一杯高蛋白牛奶", reprintPage, "Gooods好味司", "转载"},
 		{"开头作者署名", "东京香蕉", originalPage(`<p>作者：Mote莫特</p><p>正文</p><p>编辑：Kiki</p>`), "Mote莫特", "作者署名"},
 		{"文｜署名也算作者", "标题", originalPage(`<section>文｜kiki</section><p>正文</p>`), "Kiki", "作者署名"},
@@ -35,12 +36,43 @@ func TestPickAuthorFollowsRuleOrder(t *testing.T) {
 		{"自家号不算作者", "标题", originalPage(`<p>正文</p><p>来源：FBIF食品饮料创新</p>`), "", "没有署名"},
 		{"图片消息读 content_noencode", "三得利新品", `<script>var a = {copyright_stat: '0' * 1, content_noencode: '三得利推出新品。\x0a\x0a编辑：kiki\x0a\x26amp;',};</script>`, "Kiki", "编辑署名"},
 		{"都没有就留空", "标题", originalPage(`<p>只有正文</p>`), "", "没有署名"},
+		{"署名后跟自家头衔", "必胜客", originalPage(`<p>作者：Mote莫特 FBIF创始人（微信：motechan）</p><p>正文</p>`), "Mote莫特", "作者署名"},
+		{"短文的署名不被切断", "可乐", originalPage(`<p>` + strings.Repeat("正", 393) + `</p><p>作者：Milo</p>`), "Milo", "作者署名"},
 	}
 	for _, c := range cases {
 		got, rule := pickAuthor(c.title, parseArticlePage(c.page))
 		if got != c.want || rule != c.rule {
 			t.Errorf("%s: got (%q, %q), want (%q, %q)", c.name, got, rule, c.want, c.rule)
 		}
+	}
+}
+
+// 转载卡片上的名字是转载那天的：号改过名，老文章和新文章会写成两种。按公众号编号认号，沿用先写下的名字。
+func TestReprintsFromOneAccountKeepOneName(t *testing.T) {
+	worker, base, pages := newAuthorWorker(t)
+	rows := base.table("tblArticles")
+	rows["recNew"] = map[string]interface{}{"内容标题": titled("900", "1", "新转载")}
+	rows["recOld"] = map[string]interface{}{"内容标题": titled("800", "1", "老转载")}
+	rows["recOther"] = map[string]interface{}{"内容标题": titled("700", "1", "别的号")}
+	pages.pages[articleLink("900", "1")] = reprintPage
+	pages.pages[articleLink("800", "1")] = strings.Replace(reprintPage, "Gooods好味司</span>", "Gooods 好味司</span>", 1)
+	pages.pages[articleLink("700", "1")] = strings.NewReplacer("gh_90bc6f3429f4", "gh_44e51cde40c7", "Gooods好味司</span>", "凤凰WEEKLY</span>").Replace(reprintPage)
+
+	if _, err := worker.fillAuthors(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rows["recNew"]["作者"] != "Gooods好味司" || rows["recOld"]["作者"] != "Gooods好味司" || rows["recOther"]["作者"] != "凤凰WEEKLY" {
+		t.Fatalf("one account one name: %v / %v / %v", rows["recNew"]["作者"], rows["recOld"]["作者"], rows["recOther"]["作者"])
+	}
+
+	// 以后这个号又改了名，新文章也沿用表里的名字。
+	rows["recLater"] = map[string]interface{}{"内容标题": titled("950", "1", "改名以后")}
+	pages.pages[articleLink("950", "1")] = strings.Replace(reprintPage, "Gooods好味司</span>", "好味司Gooods</span>", 1)
+	if _, err := worker.fillAuthors(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rows["recLater"]["作者"] != "Gooods好味司" {
+		t.Fatalf("a renamed account keeps the name already in the table, got %v", rows["recLater"]["作者"])
 	}
 }
 

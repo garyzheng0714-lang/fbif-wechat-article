@@ -348,12 +348,36 @@ func (s *Store) BizAuthorRecords(ctx context.Context) (map[string]string, error)
 	return done, rows.Err()
 }
 
-// SaveBizAuthor 记下一行作者的处理结果；rule 是依据（标题、转载、作者署名、编辑署名…）。
-func (s *Store) SaveBizAuthor(ctx context.Context, recordID, msgID, status, value, rule string, now time.Time) error {
+// SaveBizAuthor 记下一行作者的处理结果；rule 是依据（标题、转载、作者署名、编辑署名…），
+// source 是转载来源的公众号编号（gh_…），别的依据为空。
+func (s *Store) SaveBizAuthor(ctx context.Context, recordID, msgID, status, value, rule, source string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO official_biz_authors (record_id, msg_id, status, value, rule, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO official_biz_authors (record_id, msg_id, status, value, rule, source, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(record_id) DO UPDATE SET msg_id = excluded.msg_id, status = excluded.status,
-			value = excluded.value, rule = excluded.rule, checked_at = excluded.checked_at`,
-		recordID, msgID, status, value, rule, now.UnixMilli())
+			value = excluded.value, rule = excluded.rule, source = excluded.source, checked_at = excluded.checked_at`,
+		recordID, msgID, status, value, rule, source, now.UnixMilli())
 	return err
+}
+
+// BizAuthorSourceNames 是每个转载来源公众号在表里用的名字（公众号编号 → 名字），一个号只认最早写下的那一种。
+func (s *Store) BizAuthorSourceNames(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT source, value FROM official_biz_authors
+		WHERE source != '' AND value != '' AND status = ?
+		ORDER BY checked_at, record_id`, AuthorWritten)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := make(map[string]string)
+	for rows.Next() {
+		var source, value string
+		if err := rows.Scan(&source, &value); err != nil {
+			return nil, err
+		}
+		if _, ok := names[source]; !ok {
+			names[source] = value
+		}
+	}
+	return names, rows.Err()
 }

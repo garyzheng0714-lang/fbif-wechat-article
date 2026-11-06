@@ -299,6 +299,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			approved_by TEXT NOT NULL,
 			approved_at INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS official_biz_state (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT '',
+			updated_at INTEGER NOT NULL DEFAULT 0
+		)`,
 		`CREATE TABLE IF NOT EXISTS official_comments (
 			row_key TEXT PRIMARY KEY,
 			msg_data_id TEXT NOT NULL DEFAULT '',

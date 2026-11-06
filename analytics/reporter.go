@@ -372,6 +372,9 @@ func (r *Runtime) reportDaily(ctx context.Context, result *CombinedRunResult, ru
 	}
 }
 
+// Alert 经运维告警通道发一条告警（和停摆告警同一条通道）。
+func (r *Runtime) Alert(message string) { r.reportAlert(context.Background(), message) }
+
 func (r *Runtime) reportAlert(ctx context.Context, message string) {
 	if r.Reporter == nil || !r.Reporter.Configured() {
 		log.Printf("[OfficialReporter] alert unsent (Feishu reporter not configured): %s", message)

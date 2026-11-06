@@ -27,10 +27,25 @@ const (
 	FieldTypeURL      = 15
 )
 
+const (
+	FieldTypeSingleSelect = 3
+)
+
+// FieldSpec 是要确保存在的一列。Property 只在新建这列时带上（数字格式、日期格式等），
+// 已有的列不改。
 type FieldSpec struct {
-	Name string
-	Type int
+	Name     string
+	Type     int
+	Property map[string]interface{}
 }
+
+// Base 是一个多维表格。原始镜像用环境里的 FEISHU_BITABLE_APP_TOKEN，
+// 业务数据表格用自己的 token，两者共用同一个飞书应用的 tenant token。
+type Base struct {
+	AppToken string
+}
+
+func defaultBase() Base { return Base{AppToken: config.Env.FeishuBitableAppToken} }
 
 // ==================== Feishu API ====================
 
@@ -79,23 +94,21 @@ func doFeishuRequest(method, fullURL string, body interface{}, token string) (js
 	return result.Data, nil
 }
 
-func feishuRequest(method, path string, body interface{}, tableID string) (json.RawMessage, error) {
+func (b Base) tableRequest(method, path string, body interface{}, tableID string) (json.RawMessage, error) {
 	token, err := GetToken()
 	if err != nil {
 		return nil, err
 	}
-	appToken := config.Env.FeishuBitableAppToken
-	fullURL := fmt.Sprintf("%s/%s/tables/%s%s", bitableAPIBase, appToken, tableID, path)
+	fullURL := fmt.Sprintf("%s/%s/tables/%s%s", bitableAPIBase, b.AppToken, tableID, path)
 	return doFeishuRequest(method, fullURL, body, token)
 }
 
-func feishuAppRequest(method, path string, body interface{}) (json.RawMessage, error) {
+func (b Base) appRequest(method, path string, body interface{}) (json.RawMessage, error) {
 	token, err := GetToken()
 	if err != nil {
 		return nil, err
 	}
-	appToken := config.Env.FeishuBitableAppToken
-	fullURL := fmt.Sprintf("%s/%s%s", bitableAPIBase, appToken, path)
+	fullURL := fmt.Sprintf("%s/%s%s", bitableAPIBase, b.AppToken, path)
 	return doFeishuRequest(method, fullURL, body, token)
 }
 
@@ -110,21 +123,23 @@ var (
 
 // forgetTable drops what we cached about a table after a write fails, so the
 // next run re-reads its ID and fields (a person may have renamed or deleted them).
-func forgetTable(tableID string) {
+func (b Base) forgetTable(tableID string) {
 	tableIDCacheMu.Lock()
 	defer tableIDCacheMu.Unlock()
-	delete(fieldCache, tableID)
+	delete(fieldCache, b.key(tableID))
 	for name, id := range tableIDCache {
-		if id == tableID {
+		if id == tableID && strings.HasPrefix(name, b.AppToken+"|") {
 			delete(tableIDCache, name)
 		}
 	}
 }
 
-func fieldsKnown(tableID string, required []FieldSpec) bool {
+func (b Base) key(name string) string { return b.AppToken + "|" + name }
+
+func (b Base) fieldsKnown(tableID string, required []FieldSpec) bool {
 	tableIDCacheMu.Lock()
 	defer tableIDCacheMu.Unlock()
-	known := fieldCache[tableID]
+	known := fieldCache[b.key(tableID)]
 	for _, field := range required {
 		if !known[field.Name] {
 			return false
@@ -138,14 +153,18 @@ func fieldsKnown(tableID string, required []FieldSpec) bool {
 // that field becomes the first (primary/index) column. If omitted Feishu creates
 // an unnamed default primary column.
 func GetOrCreateTable(tableName string, primaryFieldName ...string) (string, error) {
+	return defaultBase().GetOrCreateTable(tableName, primaryFieldName...)
+}
+
+func (b Base) GetOrCreateTable(tableName string, primaryFieldName ...string) (string, error) {
 	tableIDCacheMu.Lock()
-	if id, ok := tableIDCache[tableName]; ok {
+	if id, ok := tableIDCache[b.key(tableName)]; ok {
 		tableIDCacheMu.Unlock()
 		return id, nil
 	}
 	tableIDCacheMu.Unlock()
 
-	data, err := feishuAppRequest("GET", "/tables", nil)
+	data, err := b.appRequest("GET", "/tables?page_size=100", nil)
 	if err != nil {
 		return "", err
 	}
@@ -162,9 +181,9 @@ func GetOrCreateTable(tableName string, primaryFieldName ...string) (string, err
 
 	tableIDCacheMu.Lock()
 	for _, item := range result.Items {
-		tableIDCache[item.Name] = item.TableID
+		tableIDCache[b.key(item.Name)] = item.TableID
 	}
-	if id, ok := tableIDCache[tableName]; ok {
+	if id, ok := tableIDCache[b.key(tableName)]; ok {
 		tableIDCacheMu.Unlock()
 		log.Printf("[Feishu] Found existing table %q (%s)", tableName, id)
 		return id, nil
@@ -178,7 +197,7 @@ func GetOrCreateTable(tableName string, primaryFieldName ...string) (string, err
 			{"field_name": primaryFieldName[0], "type": FieldTypeText},
 		}
 	}
-	createData, err := feishuAppRequest("POST", "/tables", map[string]interface{}{
+	createData, err := b.appRequest("POST", "/tables", map[string]interface{}{
 		"table": tablePayload,
 	})
 	if err != nil {
@@ -193,7 +212,7 @@ func GetOrCreateTable(tableName string, primaryFieldName ...string) (string, err
 	}
 
 	tableIDCacheMu.Lock()
-	tableIDCache[tableName] = createResult.TableID
+	tableIDCache[b.key(tableName)] = createResult.TableID
 	tableIDCacheMu.Unlock()
 
 	log.Printf("[Feishu] Created table %q (%s)", tableName, createResult.TableID)
@@ -202,7 +221,7 @@ func GetOrCreateTable(tableName string, primaryFieldName ...string) (string, err
 
 // ==================== Field Management ====================
 
-func getExistingFields(tableID string) (map[string]bool, error) {
+func (b Base) getExistingFields(tableID string) (map[string]bool, error) {
 	fields := make(map[string]bool)
 	pageToken := ""
 
@@ -212,7 +231,7 @@ func getExistingFields(tableID string) (map[string]bool, error) {
 			params.Set("page_token", pageToken)
 		}
 
-		data, err := feishuRequest("GET", "/fields?"+params.Encode(), nil, tableID)
+		data, err := b.tableRequest("GET", "/fields?"+params.Encode(), nil, tableID)
 		if err != nil {
 			return nil, err
 		}
@@ -242,10 +261,14 @@ func getExistingFields(tableID string) (map[string]bool, error) {
 }
 
 func EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
-	if fieldsKnown(tableID, requiredFields) {
+	return defaultBase().EnsureFieldsExist(requiredFields, tableID)
+}
+
+func (b Base) EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
+	if b.fieldsKnown(tableID, requiredFields) {
 		return nil
 	}
-	existing, err := getExistingFields(tableID)
+	existing, err := b.getExistingFields(tableID)
 	if err != nil {
 		return err
 	}
@@ -256,10 +279,11 @@ func EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
 		}
 		recordWriteMu.Lock()
 		log.Printf("[Feishu] Creating field: %s (type: %d)", field.Name, field.Type)
-		_, err := feishuRequest("POST", "/fields", map[string]interface{}{
-			"field_name": field.Name,
-			"type":       field.Type,
-		}, tableID)
+		payload := map[string]interface{}{"field_name": field.Name, "type": field.Type}
+		if field.Property != nil {
+			payload["property"] = field.Property
+		}
+		_, err := b.tableRequest("POST", "/fields", payload, tableID)
 		recordWriteMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("create field %s: %w", field.Name, err)
@@ -268,7 +292,7 @@ func EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
 	}
 
 	tableIDCacheMu.Lock()
-	fieldCache[tableID] = existing
+	fieldCache[b.key(tableID)] = existing
 	tableIDCacheMu.Unlock()
 	return nil
 }
@@ -276,6 +300,10 @@ func EnsureFieldsExist(requiredFields []FieldSpec, tableID string) error {
 // ==================== Record Operations ====================
 
 func GetExistingRecords(keyField, tableID string) (map[string]string, error) {
+	return defaultBase().GetExistingRecords(keyField, tableID)
+}
+
+func (b Base) GetExistingRecords(keyField, tableID string) (map[string]string, error) {
 	records := make(map[string]string)
 	pageToken := ""
 
@@ -285,7 +313,7 @@ func GetExistingRecords(keyField, tableID string) (map[string]string, error) {
 			params.Set("page_token", pageToken)
 		}
 
-		data, err := feishuRequest("GET", "/records?"+params.Encode(), nil, tableID)
+		data, err := b.tableRequest("GET", "/records?"+params.Encode(), nil, tableID)
 		if err != nil {
 			return nil, err
 		}
@@ -337,6 +365,10 @@ func recordWriteBatchSize() int {
 // record IDs in request order. Official-data Base sync uses these IDs for
 // incremental updates instead of re-reading an entire fact table every run.
 func BatchCreateByRecordFieldsWithIDs(tableID string, records []map[string]interface{}) ([]string, error) {
+	return defaultBase().BatchCreateByRecordFieldsWithIDs(tableID, records)
+}
+
+func (b Base) BatchCreateByRecordFieldsWithIDs(tableID string, records []map[string]interface{}) ([]string, error) {
 	batchSize := recordWriteBatchSize()
 	recordIDs := make([]string, 0, len(records))
 	for i := 0; i < len(records); i += batchSize {
@@ -346,12 +378,12 @@ func BatchCreateByRecordFieldsWithIDs(tableID string, records []map[string]inter
 		}
 		batch := records[i:end]
 		recordWriteMu.Lock()
-		data, err := feishuRequest("POST", "/records/batch_create", map[string]interface{}{
+		data, err := b.tableRequest("POST", "/records/batch_create", map[string]interface{}{
 			"records": batch,
 		}, tableID)
 		recordWriteMu.Unlock()
 		if err != nil {
-			forgetTable(tableID)
+			b.forgetTable(tableID)
 			return recordIDs, fmt.Errorf("batch create with IDs (offset %d): %w", i, err)
 		}
 		var result struct {
@@ -377,6 +409,10 @@ func BatchCreateByRecordFieldsWithIDs(tableID string, records []map[string]inter
 }
 
 func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) error {
+	return defaultBase().BatchUpdateByRecordID(tableID, records)
+}
+
+func (b Base) BatchUpdateByRecordID(tableID string, records []map[string]interface{}) error {
 	batchSize := recordWriteBatchSize()
 	updated := 0
 	for i := 0; i < len(records); i += batchSize {
@@ -386,12 +422,12 @@ func BatchUpdateByRecordID(tableID string, records []map[string]interface{}) err
 		}
 		batch := records[i:end]
 		recordWriteMu.Lock()
-		_, err := feishuRequest("POST", "/records/batch_update", map[string]interface{}{
+		_, err := b.tableRequest("POST", "/records/batch_update", map[string]interface{}{
 			"records": batch,
 		}, tableID)
 		recordWriteMu.Unlock()
 		if err != nil {
-			forgetTable(tableID)
+			b.forgetTable(tableID)
 			return fmt.Errorf("batch update (offset %d): %w", i, err)
 		}
 		updated += len(batch)

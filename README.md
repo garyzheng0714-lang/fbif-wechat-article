@@ -127,6 +127,12 @@ scripts/deploy-cloud-assistant.sh
 - `OFFICIAL_BASE_SYNC_INITIAL_DELAY_SECONDS`，默认 `20`
 - 即使开启 worker，`historicalCoverage.verified` 未经完整审计和人工确认时也会在调用飞书接口前拒绝写入
 
+业务数据表和日报卡片（中台「配置项」下发，都不填就不跑）：
+
+- `BIZ_BASE_APP_TOKEN`、`BIZ_BASE_ARTICLE_TABLE_ID`：同事看数据的多维表格和其中的文章表
+- `BIZ_REPORT_CHAT_ID`：日报和周报卡片发到哪个群
+- 用 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 那个应用（「公众号数据助手」）写表、发卡片，应用要是这个多维表格的可编辑协作者、在这个群里
+
 自动排版（显式开启）：
 
 - `ENABLE_AUTO_LAYOUT=1`
@@ -168,6 +174,7 @@ scripts/deploy-cloud-assistant.sh
 | --- | --- | --- | --- |
 | `GET` | `/health` | 健康检查，返回 token 状态和 cursor 摘要。 | 不需要 |
 | `POST` | `/api/feishu/sync` | 已退役，固定返回 `410`，防止绕过 SQLite 和覆盖审计直接写 Base。 | `API_KEY` |
+| `POST` | `/api/biz/run` | 立即跑一轮业务数据表写入和日报卡片（已发过的卡片不会重发）。 | `API_KEY` |
 | `POST` | `/api/feishu/official-sync` | 仅在历史覆盖审计已通过并经人工确认后，批量增量写入 Base。 | `API_KEY` |
 | `GET` | `/api/feishu/cursor` | 查看同步进度 cursor。 | `API_KEY` |
 | `GET` | `/api/wechat/official/status` | 查看 15 个现役接口、6 个下线接口、回填游标和存储统计。 | `API_KEY` |
@@ -212,6 +219,19 @@ X-API-Key: <token>
 - 表 ID 和字段列表进程内缓存，只在第一次写某张表、或写入报错之后重读；字段被人改名或删掉时，下一轮会重读并补建。
 - 微信文章与粉丝统计接口的结束日期最大为昨日，因此指标在官方提供后的那次采集写完就同步，不能伪造成同日实时数据。
 
+### 业务数据表和日报卡片
+
+这是给同事看的业务表，和上面 13 张原始镜像表是两条路：不受 `historicalCoverage.verified` 门禁管，也不宣称「全量」，只写 SQLite 里已归档到的数据。
+
+- 文章表：接管用户 2026-11-06 导入的那张表（`BIZ_BASE_ARTICLE_TABLE_ID`）。第一次跑时按 `内容url` 里的 `mid`+`idx` 认领已有行，之后只按记下的 `record_id` 更新。范围是 `2026-03-23` 起群发（`publish_type=0`）的文章。
+- 只写数字列：阅读人数、送达人数（公众号消息阅读 ÷ 送达率）、送达率、阅读完成率、分享、关注、在看、点赞、收藏、留言。作者、国家、品类、父记录这几列不动；`等级` 只在它还等于按表里阅读数算出的档时才跟着变，有人手改过就不动。新文章追加一行，标题、发表日期、链接、等级只在新建时写。
+- 表里有人删掉的行记作删除，以后不写、不重建。
+- `每日数据` 表：第一次跑时自动新建，一天一行，从 `2025-11-01` 起，含账号阅读、互动、发文篇数、新增/取消/净增/累计关注和各来源阅读。
+- 写入和原始镜像一样靠归档叫醒，本地记 payload hash，没变化的行不调飞书；兜底间隔共用 `OFFICIAL_BASE_SYNC_FALLBACK_SECONDS`。
+- 卡片：昨天的 4 个账号与粉丝接口都采完了才发日报（昨天 KPI、当天发文表、前 7 天文章阅读前 5），周一另发上周周报（周合计对比前一周、阅读前 10）。每张卡片用日期当去重键，发过就不再发。表格用飞书卡片 JSON 2.0 的表格组件。
+- 连续失败从 1 分钟起翻倍重试，第 3 次失败时经运维日报通道告警一次。
+- `./wechat-sync biz-card daily|weekly [YYYY-MM-DD]` 打印卡片 JSON 不发送，用来看样子。
+
 ### 自动排版
 
 - 第一次启用时，库内已有 `freepublish` 文章只登记为历史基线，不会批量创建旧稿。
@@ -225,7 +245,7 @@ X-API-Key: <token>
 ### 已退役的直接同步
 
 - 旧 `ENABLE_FEISHU_SYNC` 链路会绕过 SQLite 全量关联和人工确认，现已永久 fail closed。
-- `/api/feishu/sync` 固定返回 `410`；唯一允许的 Base 写入入口是带历史覆盖门禁的 `/api/feishu/official-sync`。
+- `/api/feishu/sync` 固定返回 `410`；原始镜像表的写入入口只有带历史覆盖门禁的 `/api/feishu/official-sync`。业务数据表走上面单独那条路。
 
 ## 部署建议
 

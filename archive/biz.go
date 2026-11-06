@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -386,8 +387,10 @@ func (s *Store) BizAuthorSourceNames(ctx context.Context) (map[string]string, er
 // 状态和作者同一套（kept 人填过、written 程序填了、none 资讯订阅没标、gone 行被删了），之后不再碰。
 
 // BizLabelRecords 是已经处理过的文章行（record_id → 状态）。
+// 资讯订阅没收、没分类的两种旧记录不算看过（2026-11-07 起这些改为把正文递给资讯订阅的分类接口补），重看一遍。
 func (s *Store) BizLabelRecords(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT record_id, status FROM official_biz_labels`)
+	rows, err := s.db.QueryContext(ctx, `SELECT record_id, status FROM official_biz_labels
+		WHERE NOT (status = 'none' AND rule IN ('资讯订阅没有这篇', '资讯订阅没分类'))`)
 	if err != nil {
 		return nil, err
 	}
@@ -411,4 +414,18 @@ func (s *Store) SaveBizLabels(ctx context.Context, recordID, msgID, status, cate
 			country = excluded.country, rule = excluded.rule, checked_at = excluded.checked_at`,
 		recordID, msgID, status, category, country, rule, now.UnixMilli())
 	return err
+}
+
+// ArchivedArticleHTML 取归档里这篇文章（链接里的 mid、idx）的正文 HTML，优先已发布接口拿到的；没归档或没正文时返回空。
+func (s *Store) ArchivedArticleHTML(ctx context.Context, mid, idx string) (string, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT content_html FROM official_content_articles
+		WHERE url LIKE ? AND content_html <> '' AND is_deleted = 0
+		ORDER BY CASE source WHEN 'freepublish' THEN 0 ELSE 1 END, last_seen_at DESC
+		LIMIT 1`, "%mid="+mid+"&idx="+idx+"&%").Scan(&content)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return content, err
 }

@@ -41,6 +41,13 @@ type Worker struct {
 	FeedToken     string
 	labelWake     chan struct{}
 	labelFailures int
+	labelMisses   map[string]int // record_id → 分类接口连着几次没答、网页连着几次打不开
+	// labelBudgetUntil 前资讯订阅的历史补算额度用完了，不再读网页、递文章。
+	labelBudgetUntil time.Time
+
+	// 补作者和补品类国家共用的读网页闸口：两次之间至少隔 FetchGap；pageVerifications 是连着被微信要求验证几次。
+	pageMu            sync.Mutex
+	pageVerifications int
 }
 
 type RunResult struct {

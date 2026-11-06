@@ -113,8 +113,13 @@ func parseArticlePage(page string) articlePage {
 	return parsed
 }
 
-// pageBody 取正文：普通图文在 js_content 里；图片消息（小绿书）没有 js_content，正文在脚本的 content_noencode 里。
+// pageBody 取正文的文字。
 func pageBody(page string) string {
+	return htmlText(pageContentHTML(page))
+}
+
+// pageContentHTML 取正文的 HTML：普通图文在 js_content 里；图片消息（小绿书）没有 js_content，正文在脚本的 content_noencode 里。
+func pageContentHTML(page string) string {
 	if start := strings.Index(page, `id="js_content"`); start >= 0 {
 		rest := page[start:]
 		if open := strings.IndexByte(rest, '>'); open >= 0 {
@@ -122,13 +127,13 @@ func pageBody(page string) string {
 			if end := strings.Index(rest, "<script"); end >= 0 {
 				rest = rest[:end]
 			}
-			if text := htmlText(rest); text != "" {
-				return text
+			if htmlText(rest) != "" {
+				return rest
 			}
 		}
 	}
 	if match := noencodePattern.FindStringSubmatch(page); match != nil {
-		return htmlText(jsUnescape(match[1]))
+		return jsUnescape(match[1])
 	}
 	return ""
 }
@@ -381,6 +386,27 @@ func (w *Worker) fetchPage(ctx context.Context, link string) (string, error) {
 	return fetchArticlePage(ctx, link)
 }
 
+// readPage 读一篇公开文章页。补作者和补品类国家共用这一个闸口：两次之间至少隔 FetchGap（默认 6 秒），两边不会一起读；
+// 连着 3 次被微信要求验证（环境异常）时找人一次，两边谁读到都算，读成一篇就清零。
+func (w *Worker) readPage(ctx context.Context, link string) (string, error) {
+	w.pageMu.Lock()
+	defer w.pageMu.Unlock()
+	if err := w.pause(ctx); err != nil {
+		return "", err
+	}
+	page, err := w.fetchPage(ctx, link)
+	switch {
+	case errors.Is(err, errVerification):
+		w.pageVerifications++
+		if w.pageVerifications == 3 && w.Alert != nil {
+			w.Alert("读公众号文章网页连续 3 次被微信要求验证（环境异常）：补作者、品类、国家先停下，过一阵自动再试")
+		}
+	case err == nil || errors.Is(err, errPageGone):
+		w.pageVerifications = 0
+	}
+	return page, err
+}
+
 func (w *Worker) pause(ctx context.Context) error {
 	gap := authorFetchGap
 	if w.FetchGap != nil {
@@ -518,10 +544,7 @@ func (w *Worker) findAuthor(ctx context.Context, task authorTask) (authorFill, e
 	if value := authorFromTitle(task.title); value != "" {
 		return authorFill{value: value, rule: "标题", status: archive.AuthorWritten}, nil
 	}
-	if err := w.pause(ctx); err != nil {
-		return authorFill{}, err
-	}
-	page, err := w.fetchPage(ctx, task.link)
+	page, err := w.readPage(ctx, task.link)
 	if errors.Is(err, errPageGone) {
 		return authorFill{rule: "文章已删", status: archive.AuthorNone}, nil
 	}
@@ -656,7 +679,7 @@ func (w *Worker) authorRound(ctx context.Context, fallback time.Duration) time.D
 	}
 	w.authorFailures++
 	log.Printf("[BizData] author round failed (%d in a row): %v", w.authorFailures, err)
-	if w.authorFailures == 3 && w.Alert != nil {
+	if w.authorFailures == 3 && w.Alert != nil && !errors.Is(err, errVerification) { // 被要求验证由 readPage 报
 		w.Alert(fmt.Sprintf("公众号文章作者补全连续 3 次失败：%v", err))
 	}
 	backoff := firstRetry << (w.authorFailures - 1)

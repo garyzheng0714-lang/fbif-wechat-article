@@ -100,13 +100,13 @@ func kpiTiles(items []kpi, link string) map[string]interface{} {
 		if link != "" {
 			tile["elements"] = []interface{}{map[string]interface{}{
 				"tag": "interactive_container", "width": "fill", "has_border": true, "border_color": "grey-100",
-				"corner_radius": "12px", "padding": "12px 12px 12px 12px", "vertical_spacing": "0px",
+				"corner_radius": "12px", "padding": "12px 10px 12px 10px", "vertical_spacing": "0px",
 				"behaviors": []interface{}{map[string]interface{}{"type": "open_url", "default_url": link}},
 				"elements":  elements,
 			}}
 		} else {
 			tile["background_style"] = "grey-50"
-			tile["padding"] = "12px 12px 12px 12px"
+			tile["padding"] = "12px 10px 12px 10px"
 			tile["elements"] = elements
 		}
 		columns = append(columns, tile)
@@ -133,15 +133,15 @@ type articleColumn struct {
 	value                          func(archive.BizArticle) interface{}
 }
 
-// 数字列定宽 80px，标题列吃剩下的宽：电脑上铺满卡片一屏看全，手机上标题列冻结、左右滑看数字。
+// 卡片用飞书默认宽度（电脑上约 600px，用户 2026-11-06 嫌铺满聊天窗口太宽）。列宽按比例：标题 40%，五个数字列各 12%，
+// 标题折成两行，六列一屏看全；手机上标题列冻结、左右滑看数字。
 var (
-	colTitle   = articleColumn{"title", "文章", "lark_md", "auto", func(a archive.BizArticle) interface{} { return articleLink(a) }}
-	colDate    = articleColumn{"date", "发表", "text", "80px", func(a archive.BizArticle) interface{} { return a.PublishDate[5:] }}
-	colRead    = articleColumn{"read", "阅读", "number", "80px", func(a archive.BizArticle) interface{} { return a.ReadUser }}
-	colShare   = articleColumn{"share", "分享", "number", "80px", func(a archive.BizArticle) interface{} { return a.ShareUser }}
-	colZaikan  = articleColumn{"zaikan", "在看", "number", "80px", func(a archive.BizArticle) interface{} { return a.Zaikan }}
-	colFinish  = articleColumn{"finish", "完成率", "text", "80px", func(a archive.BizArticle) interface{} { return percent(a.FinishRate) }}
-	colReadSub = articleColumn{"subscribe", "关注", "number", "80px", func(a archive.BizArticle) interface{} { return a.Subscribe }}
+	colTitle  = articleColumn{"title", "文章", "lark_md", "40%", func(a archive.BizArticle) interface{} { return articleLink(a) }}
+	colDate   = articleColumn{"date", "发表", "text", "12%", func(a archive.BizArticle) interface{} { return a.PublishDate[5:] }}
+	colRead   = articleColumn{"read", "阅读", "number", "12%", func(a archive.BizArticle) interface{} { return a.ReadUser }}
+	colShare  = articleColumn{"share", "分享", "number", "12%", func(a archive.BizArticle) interface{} { return a.ShareUser }}
+	colZaikan = articleColumn{"zaikan", "在看", "number", "12%", func(a archive.BizArticle) interface{} { return a.Zaikan }}
+	colFinish = articleColumn{"finish", "完成率", "text", "12%", func(a archive.BizArticle) interface{} { return percent(a.FinishRate) }}
 )
 
 func articleTable(articles []archive.BizArticle, columns ...articleColumn) map[string]interface{} {
@@ -219,7 +219,7 @@ func (w *Worker) card(title, subtitle string, elements []interface{}) map[string
 	}
 	return map[string]interface{}{
 		"schema": "2.0",
-		"config": map[string]interface{}{"width_mode": "fill", "summary": map[string]interface{}{"content": title + " · " + subtitle}},
+		"config": map[string]interface{}{"summary": map[string]interface{}{"content": title + " · " + subtitle}},
 		"header": map[string]interface{}{
 			"template": "wathet",
 			"title":    map[string]interface{}{"tag": "plain_text", "content": title},
@@ -239,9 +239,9 @@ func dayByDate(days []archive.BizDay) map[string]archive.BizDay {
 	return byDate
 }
 
-// followerNote 净增关注那块下面一行：新增、取关各多少。
+// followerNote 净增关注那块下面一行：新增、取关各多少。不加「·」：电脑上一块约 138px 宽，四位数以内排得下一行，四块等高。
 func followerNote(newUser, cancelUser int64) string {
-	return grey(fmt.Sprintf("新增 %s · 取关 %s", formatInt(newUser), formatInt(cancelUser)))
+	return grey(fmt.Sprintf("新增 %s 取关 %s", formatInt(newUser), formatInt(cancelUser)))
 }
 
 // growthNote 累计关注那块下面一行：比 since 那天多了多少；那天没采到就空着。
@@ -345,7 +345,7 @@ func (w *Worker) WeeklyCard(ctx context.Context, monday time.Time) (map[string]i
 	}, w.dailyTableURL(ctx))}
 	if len(articles) > 0 {
 		elements = append(elements, heading(fmt.Sprintf("这周发文 %d 篇", len(articles))),
-			articleTable(newestFirst(articles), colTitle, colDate, colRead, colShare, colZaikan, colFinish, colReadSub))
+			articleTable(newestFirst(articles), colTitle, colDate, colRead, colShare, colZaikan, colFinish))
 	} else {
 		elements = append(elements, heading("这周没有发文"))
 	}

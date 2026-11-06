@@ -324,7 +324,7 @@ func TestDailyCardWaitsForDataAndIsSentOnce(t *testing.T) {
 	}
 	encoded, _ := json.Marshal(sent[0])
 	text := string(encoded)
-	for _, want := range []string{`"template":"wathet"`, `"content":"公众号日报"`, "11月5日 周四", "19,388", "↑ 29.3%", "+60", "新增 70 · 取关 10", "645,251",
+	for _, want := range []string{`"template":"wathet"`, `"content":"公众号日报"`, "11月5日 周四", "19,388", "↑ 29.3%", "+60", "新增 70 取关 10", "645,251",
 		"interactive_container", "近 7 天发文 3 篇", `"tag":"table"`, "打开数据表"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("card missing %q: %s", want, text)

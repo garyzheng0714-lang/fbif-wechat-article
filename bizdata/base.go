@@ -1,8 +1,9 @@
-// Package bizdata 把已经采到的公众号数据写进业务同事看的多维表格，并发数据汇报卡片。
+// Package bizdata 把已经采到的公众号数据写进业务同事看的多维表格。
 //
 // 和 officialbase 的区别：officialbase 是 13 张原始表的整库镜像，受历史覆盖审计门禁管；
-// 这里只写两张给人看的表（文章数据、每日数据，都关联到「公众号」表）和两种卡片（日报、周报），
+// 这里只写两张给人看的表（文章数据、每日数据，都关联到「公众号」表），
 // 用户 2026-11-06 定：单独写回，不受那道门禁，也不在表里写「全量」。
+// 文章表的「作者」空着时由 author.go 从公开文章页补上。
 package bizdata
 
 import (
@@ -101,7 +102,7 @@ var sourceColumns = []struct{ Scene, Column string }{
 }
 
 // 文章表里这些列归本服务写，微信给的都写上（用户 2026-11-06：字段应多尽多）；
-// 作者、国家、品类这些人填的列一概不碰。首列「内容标题」是超链接，点开就是原文。
+// 国家、品类这些人填的列不碰；作者只由 author.go 填空着的格子。首列「内容标题」是超链接，点开就是原文。
 var articleFields = func() []feishu.FieldSpec {
 	fields := []feishu.FieldSpec{
 		{Name: "内容标题", Type: feishu.FieldTypeURL},

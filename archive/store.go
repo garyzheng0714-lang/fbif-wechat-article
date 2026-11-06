@@ -307,6 +307,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			value TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS official_biz_authors (
+			record_id TEXT PRIMARY KEY,
+			msg_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			value TEXT NOT NULL DEFAULT '',
+			rule TEXT NOT NULL DEFAULT '',
+			checked_at INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS official_comments (
 			row_key TEXT PRIMARY KEY,
 			msg_data_id TEXT NOT NULL DEFAULT '',

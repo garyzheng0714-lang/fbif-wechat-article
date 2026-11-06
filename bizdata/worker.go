@@ -24,10 +24,17 @@ type Worker struct {
 	// Alert 只在连续失败到第 3 次那一刻调一次。
 	Alert func(message string)
 	Now   func() time.Time
+	// FetchPage 读公开文章页，测试里换掉；FetchGap 是两次读网页的间隔，默认 6 秒。
+	FetchPage func(ctx context.Context, link string) (string, error)
+	FetchGap  *time.Duration
 
 	runMu    sync.Mutex
 	wake     chan struct{}
 	failures int
+
+	authorWake     chan struct{}
+	authorFailures int
+	authorMisses   map[string]int // record_id → 连着打不开几次
 }
 
 type RunResult struct {
@@ -50,6 +57,7 @@ func NewFromEnv(store *archive.Store) *Worker {
 		BaseToken:      baseToken,
 		ArticleTableID: articleTable,
 		wake:           make(chan struct{}, 1),
+		authorWake:     make(chan struct{}, 1),
 	}
 }
 
@@ -77,6 +85,9 @@ func (w *Worker) Run(ctx context.Context) (*RunResult, error) {
 	}
 	defer w.runMu.Unlock()
 	base, err := w.syncBase(ctx)
+	if base != nil && base.Articles.Created+base.Articles.Adopted > 0 {
+		w.WakeAuthors() // 有新的文章行，去补作者
+	}
 	return &RunResult{Base: base}, err
 }
 
@@ -90,7 +101,8 @@ func Start(stopCh <-chan struct{}, worker *Worker, fallback time.Duration) {
 		return
 	}
 	go worker.loop(stopCh, 20*time.Second, fallback)
-	log.Printf("[BizData] worker started: on archive change, fallback every %s", fallback)
+	go worker.authorLoop(stopCh, 2*time.Minute, fallback)
+	log.Printf("[BizData] worker started: on archive change, fallback every %s; 作者 filled from article pages on new rows", fallback)
 }
 
 func (w *Worker) loop(stopCh <-chan struct{}, initialDelay, fallback time.Duration) {

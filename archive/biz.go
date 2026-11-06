@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-// 业务数据表格和数据汇报卡片读的数据。口径：
+// 业务数据表格读的数据。口径：
 //   - 文章：getarticletotaldetail 里的文章，取发表后 30 天内最新一天的累计值；发表后
-//     第 31 天起微信不再更新，这里的值也就定住了。卡片只看群发（publish_type=0）的，
-//     表格连只发表、没通知粉丝的（publish_type=1）也写。
+//     第 31 天起微信不再更新，这里的值也就定住了。群发的和只发表、没通知粉丝的
+//     （publish_type=1）都算。
 //   - 每天：getbizsummary 的账号当天阅读、互动和来源，加上 getusersummary 各来源
 //     合计的新增/取关和 getusercumulate 的累计关注。
 // 这些只是已经采到的数据，不代表历史全量。
@@ -318,5 +318,42 @@ func (s *Store) SetBizState(ctx context.Context, key, value string, now time.Tim
 		INSERT INTO official_biz_state (key, value, updated_at) VALUES (?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
 		key, value, now.UnixMilli())
+	return err
+}
+
+// 文章表「作者」列每一行处理到哪了，按 record_id 记：处理过的行不再碰，
+// 所以程序填过、后来被人清空的格子也不会再被填回去。
+const (
+	AuthorKept    = "kept"    // 表里本来就有作者（人填的），不碰
+	AuthorWritten = "written" // 程序填了 value
+	AuthorNone    = "none"    // 网页里找不到署名、文章已删或一直打不开，留空
+	AuthorGone    = "gone"    // 这一行在表格里被人删了
+)
+
+// BizAuthorRecords 是已经处理过的文章行（record_id → 状态）。
+func (s *Store) BizAuthorRecords(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT record_id, status FROM official_biz_authors`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	done := make(map[string]string)
+	for rows.Next() {
+		var recordID, status string
+		if err := rows.Scan(&recordID, &status); err != nil {
+			return nil, err
+		}
+		done[recordID] = status
+	}
+	return done, rows.Err()
+}
+
+// SaveBizAuthor 记下一行作者的处理结果；rule 是依据（标题、转载、作者署名、编辑署名…）。
+func (s *Store) SaveBizAuthor(ctx context.Context, recordID, msgID, status, value, rule string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO official_biz_authors (record_id, msg_id, status, value, rule, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(record_id) DO UPDATE SET msg_id = excluded.msg_id, status = excluded.status,
+			value = excluded.value, rule = excluded.rule, checked_at = excluded.checked_at`,
+		recordID, msgID, status, value, rule, now.UnixMilli())
 	return err
 }

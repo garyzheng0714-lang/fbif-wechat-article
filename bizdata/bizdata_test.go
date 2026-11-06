@@ -117,10 +117,16 @@ func link(mid, idx string) map[string]interface{} {
 
 func save(t *testing.T, store *archive.Store, endpoint, date string, list ...interface{}) {
 	t.Helper()
+	saveFetch(t, store, endpoint, date, false, list...)
+}
+
+// saveFetch 照采集器的样子留一次请求；deferred 是微信回了 is_delay（数据还没出完）。
+func saveFetch(t *testing.T, store *archive.Store, endpoint, date string, deferred bool, list ...interface{}) {
+	t.Helper()
 	response, _ := json.Marshal(map[string]interface{}{"list": list})
 	if _, err := store.SaveFetch(context.Background(), archive.FetchRecord{
 		Endpoint: endpoint, Category: "test", BeginDate: date, EndDate: date,
-		RequestJSON: []byte(`{}`), ResponseJSON: response, HTTPStatus: 200, Success: true,
+		RequestJSON: []byte(`{}`), ResponseJSON: response, HTTPStatus: 200, Success: true, Deferred: deferred,
 		FetchedAt: time.Date(2026, 11, 6, 8, 6, 0, 0, wechat.ShanghaiLoc()),
 	}); err != nil {
 		t.Fatal(err)
@@ -256,15 +262,6 @@ func seedDay(t *testing.T, store *archive.Store, date string, reads int64, pages
 	save(t, store, "getusercumulate", date, map[string]interface{}{"ref_date": date, "user_source": 0, "cumulate_user": 645251})
 }
 
-func markReady(t *testing.T, store *archive.Store, date string) {
-	t.Helper()
-	for _, endpoint := range reportEndpoints {
-		if err := store.MarkSuccess(context.Background(), endpoint, "test", date, date, "", time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
 func TestDailyTableIsCreatedOnceAndFilled(t *testing.T) {
 	worker, store, base := newWorker(t)
 	seedDay(t, store, "2026-11-05", 19388, 5)
@@ -298,16 +295,24 @@ func TestDailyCardWaitsForDataAndIsSentOnce(t *testing.T) {
 	}
 	seedDay(t, store, "2026-11-04", 15000, 4)
 	seedDay(t, store, "2026-11-05", 19388, 5)
-	save(t, store, "getarticletotaldetail", "2026-11-05",
+	yesterday := []interface{}{
+		article("2652943556_2", "2026-11-05", 0, stat("2026-11-05", 1371, 100, 0.001)),
 		article("2652943556_1", "2026-11-05", 0, stat("2026-11-05", 10927, 8742, 0.0135791515931)),
-		article("2652943556_2", "2026-11-05", 0, stat("2026-11-05", 1371, 100, 0.001)))
+	}
+	// 微信先回了 is_delay：昨天的文章数据还没出完，不能发。
+	saveFetch(t, store, "getarticletotaldetail", "2026-11-05", true, yesterday...)
 	save(t, store, "getarticletotaldetail", "2026-11-01", article("2652943000_1", "2026-11-01", 0, stat("2026-11-05", 30000, 0, 0)))
+	save(t, store, "getarticletotaldetail", "2026-10-29", article("2652942000_1", "2026-10-29", 0, stat("2026-11-05", 99999, 0, 0))) // 早于近 7 天
 
 	result, err := worker.sendReports(context.Background())
 	if err != nil || len(sent) != 0 || result.Waiting != "2026-11-05" {
-		t.Fatalf("must wait until yesterday is collected: err=%v sent=%d result=%+v", err, len(sent), result)
+		t.Fatalf("must wait until yesterday is final: err=%v sent=%d result=%+v", err, len(sent), result)
 	}
-	markReady(t, store, "2026-11-05")
+	save(t, store, "getarticletotaldetail", "2026-11-05", yesterday...)
+	// 历史回填接着写了很早的窗口，不能把「昨天已采完」盖掉。
+	if err := store.MarkSuccess(context.Background(), "getusersummary", "test", "2025-12-01", "2025-12-07", "2025-11-30", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := worker.sendReports(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -319,10 +324,18 @@ func TestDailyCardWaitsForDataAndIsSentOnce(t *testing.T) {
 	}
 	encoded, _ := json.Marshal(sent[0])
 	text := string(encoded)
-	for _, want := range []string{"公众号日报 · 11月5日 周四", "19,388", "↑29.3%", "+60", "645,251", "当天发文 2 篇", `"tag":"table"`, "标题2652943556_1", "前 7 天文章", "标题2652943000_1", "打开数据表"} {
+	for _, want := range []string{`"template":"wathet"`, `"content":"公众号日报"`, "11月5日 周四", "19,388", "↑ 29.3%", "+60", "新增 70 · 取关 10", "645,251",
+		"interactive_container", "近 7 天发文 3 篇", `"tag":"table"`, "打开数据表"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("card missing %q: %s", want, text)
 		}
+	}
+	if strings.Contains(text, "标题2652942000_1") {
+		t.Fatalf("articles older than 7 days must not be listed: %s", text)
+	}
+	first, second, third := strings.Index(text, "标题2652943556_1"), strings.Index(text, "标题2652943556_2"), strings.Index(text, "标题2652943000_1")
+	if first < 0 || !(first < second && second < third) {
+		t.Fatalf("articles must be newest first, lead article first: %d %d %d", first, second, third)
 	}
 }
 
@@ -340,7 +353,7 @@ func TestWeeklyCardOnlyOnMonday(t *testing.T) {
 	for day := 1; day <= 8; day++ {
 		seedDay(t, store, fmt.Sprintf("2026-11-%02d", day), 12000, 3)
 	}
-	markReady(t, store, "2026-11-08")
+	save(t, store, "getarticletotaldetail", "2026-11-08")
 	worker.Now = func() time.Time { return time.Date(2026, 11, 9, 8, 10, 0, 0, wechat.ShanghaiLoc()) } // 周一
 	if _, err := worker.sendReports(context.Background()); err != nil {
 		t.Fatal(err)
@@ -353,7 +366,7 @@ func TestWeeklyCardOnlyOnMonday(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(card)
-	if !strings.Contains(string(encoded), "公众号周报 · 11月2日–11月8日") || !strings.Contains(string(encoded), "84,000") {
+	if text := string(encoded); !strings.Contains(text, "11月2日–11月8日") || !strings.Contains(text, "84,000") || !strings.Contains(text, "↑ 16.7%") {
 		t.Fatalf("weekly totals wrong: %s", encoded)
 	}
 }

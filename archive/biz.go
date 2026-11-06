@@ -289,3 +289,20 @@ func (s *Store) SetBizState(ctx context.Context, key, value string, now time.Tim
 		key, value, now.UnixMilli())
 	return err
 }
+
+// FetchedFinal 是 endpoint 有没有一次成功、且微信没标延迟（is_delay）的请求覆盖到 date。
+// 不看 official_api_state.last_success_end：那是最后写的窗口，历史回填一跑就被写成很早的日期。
+func (s *Store) FetchedFinal(ctx context.Context, endpoint, date string) (bool, error) {
+	day, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return false, err
+	}
+	// 官方单次最长 30 天，往前 60 天足够覆盖，也让查询走索引的一小段。
+	floor := day.AddDate(0, 0, -60).Format("2006-01-02")
+	var found int
+	err = s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM official_api_fetches
+		WHERE endpoint = ? AND begin_date >= ? AND begin_date <= ? AND end_date >= ?
+		  AND success = 1 AND deferred = 0)`, endpoint, floor, date, date).Scan(&found)
+	return found == 1, err
+}

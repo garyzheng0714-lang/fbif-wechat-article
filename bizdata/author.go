@@ -603,9 +603,9 @@ func (w *Worker) WakeAuthors() {
 	}
 }
 
-// authorLoop 不定时轮询：启动后跑一轮（补历史、接着上次没补完的），之后只在写表那边新建或认领了文章行时被叫醒；
-// 失败从 1 分钟起翻倍退避，最长到兜底间隔，连续失败第 3 次找人一次。
-func (w *Worker) authorLoop(stopCh <-chan struct{}, initialDelay, fallback time.Duration) {
+// wakeLoop 不定时轮询：启动后跑一轮（补历史、接着上次没补完的），之后只在写表那边新建或认领了文章行时被叫醒；
+// round 返回下次最晚多久再跑（失败退避、或有事要过一会儿再看），0 表示只等叫醒。作者、品类国家各用一个。
+func wakeLoop(stopCh <-chan struct{}, wake <-chan struct{}, initialDelay time.Duration, round func(context.Context) time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -622,14 +622,14 @@ func (w *Worker) authorLoop(stopCh <-chan struct{}, initialDelay, fallback time.
 		}
 		select {
 		case <-fire:
-		case <-w.authorWake:
+		case <-wake:
 		case <-ctx.Done():
 			return
 		}
 		if timer != nil {
 			timer.Stop()
 		}
-		wait = w.authorRound(ctx, fallback)
+		wait = round(ctx)
 	}
 }
 

@@ -381,3 +381,34 @@ func (s *Store) BizAuthorSourceNames(ctx context.Context) (map[string]string, er
 	}
 	return names, rows.Err()
 }
+
+// 品类、国家补填（用户 2026-11-06 定：直接用资讯订阅打的标签）：看过的行记在 official_biz_labels，
+// 状态和作者同一套（kept 人填过、written 程序填了、none 资讯订阅没标、gone 行被删了），之后不再碰。
+
+// BizLabelRecords 是已经处理过的文章行（record_id → 状态）。
+func (s *Store) BizLabelRecords(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT record_id, status FROM official_biz_labels`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	done := make(map[string]string)
+	for rows.Next() {
+		var recordID, status string
+		if err := rows.Scan(&recordID, &status); err != nil {
+			return nil, err
+		}
+		done[recordID] = status
+	}
+	return done, rows.Err()
+}
+
+// SaveBizLabels 记下一行品类、国家的处理结果；category、country 是程序写进去的（逗号隔开），rule 是依据。
+func (s *Store) SaveBizLabels(ctx context.Context, recordID, msgID, status, category, country, rule string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO official_biz_labels (record_id, msg_id, status, category, country, rule, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(record_id) DO UPDATE SET msg_id = excluded.msg_id, status = excluded.status, category = excluded.category,
+			country = excluded.country, rule = excluded.rule, checked_at = excluded.checked_at`,
+		recordID, msgID, status, category, country, rule, now.UnixMilli())
+	return err
+}

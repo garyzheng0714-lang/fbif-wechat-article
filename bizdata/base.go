@@ -102,7 +102,7 @@ var sourceColumns = []struct{ Scene, Column string }{
 }
 
 // 文章表里这些列归本服务写，微信给的都写上（用户 2026-11-06：字段应多尽多）；
-// 国家、品类这些人填的列不碰；作者只由 author.go 填空着的格子。首列「内容标题」是超链接，点开就是原文。
+// 品类、国家、作者这些人填的列这里不碰：作者由 author.go、品类国家由 labels.go 只填空着的格子。首列「内容标题」是超链接，点开就是原文。
 var articleFields = func() []feishu.FieldSpec {
 	fields := []feishu.FieldSpec{
 		{Name: "内容标题", Type: feishu.FieldTypeURL},

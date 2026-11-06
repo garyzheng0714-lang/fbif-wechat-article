@@ -35,6 +35,12 @@ type Worker struct {
 	authorWake     chan struct{}
 	authorFailures int
 	authorMisses   map[string]int // record_id → 连着打不开几次
+
+	// FeedURL、FeedToken 是资讯订阅的地址和取标签的口令（中台 token.feed.labels）；没口令就不补品类、国家。
+	FeedURL       string
+	FeedToken     string
+	labelWake     chan struct{}
+	labelFailures int
 }
 
 type RunResult struct {
@@ -51,13 +57,17 @@ func NewFromEnv(store *archive.Store) *Worker {
 		}
 		return nil
 	}
+	feedURL, feedToken := labelsFromEnv()
 	return &Worker{
 		Store:          store,
 		Base:           feishu.Base{AppToken: baseToken},
 		BaseToken:      baseToken,
 		ArticleTableID: articleTable,
+		FeedURL:        feedURL,
+		FeedToken:      feedToken,
 		wake:           make(chan struct{}, 1),
 		authorWake:     make(chan struct{}, 1),
+		labelWake:      make(chan struct{}, 1),
 	}
 }
 
@@ -86,7 +96,8 @@ func (w *Worker) Run(ctx context.Context) (*RunResult, error) {
 	defer w.runMu.Unlock()
 	base, err := w.syncBase(ctx)
 	if base != nil && base.Articles.Created+base.Articles.Adopted > 0 {
-		w.WakeAuthors() // 有新的文章行，去补作者
+		w.WakeAuthors() // 有新的文章行，去补作者、品类、国家
+		w.WakeLabels()
 	}
 	return &RunResult{Base: base}, err
 }
@@ -101,8 +112,13 @@ func Start(stopCh <-chan struct{}, worker *Worker, fallback time.Duration) {
 		return
 	}
 	go worker.loop(stopCh, 20*time.Second, fallback)
-	go worker.authorLoop(stopCh, 2*time.Minute, fallback)
-	log.Printf("[BizData] worker started: on archive change, fallback every %s; 作者 filled from article pages on new rows", fallback)
+	go wakeLoop(stopCh, worker.authorWake, 2*time.Minute, func(ctx context.Context) time.Duration { return worker.authorRound(ctx, fallback) })
+	labels := "品类、国家 not filled (FEED_LABELS_TOKEN not set)"
+	if worker.FeedToken != "" {
+		go wakeLoop(stopCh, worker.labelWake, time.Minute, func(ctx context.Context) time.Duration { return worker.labelRound(ctx, fallback) })
+		labels = "品类、国家 from 资讯订阅 labels"
+	}
+	log.Printf("[BizData] worker started: on archive change, fallback every %s; 作者 filled from article pages on new rows; %s", fallback, labels)
 }
 
 func (w *Worker) loop(stopCh <-chan struct{}, initialDelay, fallback time.Duration) {

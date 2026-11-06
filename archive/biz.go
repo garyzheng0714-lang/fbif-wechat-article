@@ -11,8 +11,9 @@ import (
 )
 
 // 业务数据表格和数据汇报卡片读的数据。口径：
-//   - 文章：getarticletotaldetail 里群发（publish_type=0）的文章，取发表后 30 天内
-//     最新一天的累计值；发表后第 31 天起微信不再更新，这里的值也就定住了。
+//   - 文章：getarticletotaldetail 里的文章，取发表后 30 天内最新一天的累计值；发表后
+//     第 31 天起微信不再更新，这里的值也就定住了。卡片只看群发（publish_type=0）的，
+//     表格连只发表、没通知粉丝的（publish_type=1）也写。
 //   - 每天：getbizsummary 的账号当天阅读、互动和来源，加上 getusersummary 各来源
 //     合计的新增/取关和 getusercumulate 的累计关注。
 // 这些只是已经采到的数据，不代表历史全量。
@@ -34,7 +35,14 @@ type BizArticle struct {
 	DeliveryRate float64 // 送达阅读率：公众号消息阅读人数 / 送达人数
 	FinishRate   float64
 	MessageReads int64 // 从公众号消息进来的阅读人数
-	SeenAt       int64
+	Notified     bool  // 群发时通知了粉丝（publish_type=0）；false 是只发表
+	PraiseMoney  int64 // 赞赏金额，分
+	AvgMinutes   float64
+	// JumpRates 是跳出位置分布：文章进度 0-20%、20-40%、40-60%、60-80%、80-100% 处跳出的人各占多少；
+	// 微信没给时为 nil。
+	JumpRates []float64
+	Sources   map[string]int64 // 阅读来源 scene_desc → 人数
+	SeenAt    int64
 }
 
 // Delivered 是送达人数：公众号消息阅读人数除以送达阅读率。微信没给送达率时为 0。
@@ -45,16 +53,26 @@ func (a BizArticle) Delivered() int64 {
 	return int64(float64(a.MessageReads)/a.DeliveryRate + 0.5)
 }
 
+// BizArticles 是群发（通知了粉丝）的文章，卡片用。
 func (s *Store) BizArticles(ctx context.Context, since, until string) ([]BizArticle, error) {
+	return s.bizArticles(ctx, since, until, true)
+}
+
+// BizArticlesAll 连只发表、没通知粉丝的文章也算，表格用。
+func (s *Store) BizArticlesAll(ctx context.Context, since, until string) ([]BizArticle, error) {
+	return s.bizArticles(ctx, since, until, false)
+}
+
+func (s *Store) bizArticles(ctx context.Context, since, until string, notifiedOnly bool) ([]BizArticle, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		WITH items AS (
-			SELECT msgid, ref_date, title, json_extract(raw_json, '$.content_url') AS content_url
+			SELECT msgid, ref_date, title, json_extract(raw_json, '$.content_url') AS content_url,
+				COALESCE(json_extract(raw_json, '$.publish_type'), 0) AS publish_type
 			FROM official_api_rows
 			WHERE endpoint = 'getarticletotaldetail' AND row_scope = 'item'
 				AND ref_date >= ? AND ref_date <= ?
-				AND COALESCE(json_extract(raw_json, '$.publish_type'), 0) = 0
 		)
-		SELECT i.msgid, i.ref_date, i.title, COALESCE(i.content_url, ''),
+		SELECT i.msgid, i.ref_date, i.title, COALESCE(i.content_url, ''), i.publish_type = 0,
 			COALESCE(d.stat_date, ''), COALESCE(d.raw_json, '{}'), COALESCE(d.last_seen_at, 0)
 		FROM items AS i
 		LEFT JOIN official_api_rows AS d ON d.rowid = (
@@ -63,7 +81,8 @@ func (s *Store) BizArticles(ctx context.Context, since, until string) ([]BizArti
 				AND latest.msgid = i.msgid
 			ORDER BY latest.stat_date DESC LIMIT 1
 		)
-		ORDER BY i.ref_date, i.msgid`, since, until)
+		WHERE i.publish_type = 0 OR ? = 0
+		ORDER BY i.ref_date, i.msgid`, since, until, notifiedOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +91,7 @@ func (s *Store) BizArticles(ctx context.Context, since, until string) ([]BizArti
 	for rows.Next() {
 		var article BizArticle
 		var raw string
-		if err := rows.Scan(&article.MsgID, &article.PublishDate, &article.Title, &article.URL, &article.StatDate, &raw, &article.SeenAt); err != nil {
+		if err := rows.Scan(&article.MsgID, &article.PublishDate, &article.Title, &article.URL, &article.Notified, &article.StatDate, &raw, &article.SeenAt); err != nil {
 			return nil, err
 		}
 		if _, index, ok := strings.Cut(article.MsgID, "_"); ok {
@@ -88,10 +107,16 @@ func (s *Store) BizArticles(ctx context.Context, since, until string) ([]BizArti
 			Comment        int64   `json:"comment_count"`
 			DeliveryRate   float64 `json:"read_delivery_rate"`
 			FinishRate     float64 `json:"read_finish_rate"`
+			PraiseMoney    int64   `json:"praise_money"`
+			AvgMinutes     float64 `json:"read_avg_activetime"`
 			ReadUserSource []struct {
 				UserCount int64  `json:"user_count"`
 				SceneDesc string `json:"scene_desc"`
 			} `json:"read_user_source"`
+			JumpPosition []struct {
+				Position int     `json:"position"`
+				Rate     float64 `json:"rate"`
+			} `json:"read_jump_position"`
 		}
 		if err := json.Unmarshal([]byte(raw), &detail); err != nil {
 			return nil, err
@@ -99,9 +124,18 @@ func (s *Store) BizArticles(ctx context.Context, since, until string) ([]BizArti
 		article.ReadUser, article.ShareUser, article.Subscribe = detail.ReadUser, detail.ShareUser, detail.Subscribe
 		article.Zaikan, article.Like, article.Collection, article.Comment = detail.Zaikan, detail.Like, detail.Collection, detail.Comment
 		article.DeliveryRate, article.FinishRate = detail.DeliveryRate, detail.FinishRate
+		article.PraiseMoney, article.AvgMinutes = detail.PraiseMoney, detail.AvgMinutes
+		article.Sources = make(map[string]int64, len(detail.ReadUserSource))
 		for _, source := range detail.ReadUserSource {
-			if source.SceneDesc == "公众号消息" {
-				article.MessageReads = source.UserCount
+			article.Sources[source.SceneDesc] = source.UserCount
+		}
+		article.MessageReads = article.Sources["公众号消息"]
+		if len(detail.JumpPosition) > 0 {
+			article.JumpRates = make([]float64, 5)
+			for _, jump := range detail.JumpPosition {
+				if jump.Position >= 1 && jump.Position <= 5 {
+					article.JumpRates[jump.Position-1] = jump.Rate
+				}
 			}
 		}
 		articles = append(articles, article)
@@ -110,22 +144,24 @@ func (s *Store) BizArticles(ctx context.Context, since, until string) ([]BizArti
 }
 
 type BizDay struct {
-	Date        string // YYYY-MM-DD
-	HasSummary  bool
-	ReadUser    int64
-	ShareUser   int64
-	Zaikan      int64
-	Like        int64
-	Comment     int64
-	Collection  int64
-	SendPages   int64
-	Sources     map[string]int64 // 阅读来源 scene_desc → 人数
-	HasFollower bool
-	NewUser     int64
-	CancelUser  int64
-	HasCumulate bool
-	Cumulate    int64
-	SeenAt      int64
+	Date             string // YYYY-MM-DD
+	HasSummary       bool
+	ReadUser         int64
+	ShareUser        int64
+	Zaikan           int64
+	Like             int64
+	Comment          int64
+	Collection       int64
+	SendPages        int64
+	Sources          map[string]int64 // 阅读来源 scene_desc → 人数
+	RedirectOriginal int64            // 点「阅读原文」的人数
+	HasFollower      bool
+	NewUser          int64
+	CancelUser       int64
+	NewBySource      map[int]int64 // getusersummary 的 user_source → 新增关注
+	HasCumulate      bool
+	Cumulate         int64
+	SeenAt           int64
 }
 
 func (d BizDay) NetUser() int64 { return d.NewUser - d.CancelUser }
@@ -135,7 +171,7 @@ func (s *Store) BizDays(ctx context.Context, since, until string) ([]BizDay, err
 	days := make(map[string]*BizDay)
 	day := func(date string) *BizDay {
 		if days[date] == nil {
-			days[date] = &BizDay{Date: date, Sources: map[string]int64{}}
+			days[date] = &BizDay{Date: date, Sources: map[string]int64{}, NewBySource: map[int]int64{}}
 		}
 		return days[date]
 	}
@@ -167,6 +203,7 @@ func (s *Store) BizDays(ctx context.Context, since, until string) ([]BizDay, err
 				Comment        int64 `json:"comment_count"`
 				Collection     int64 `json:"collection_user"`
 				SendPages      int64 `json:"send_page_count"`
+				Redirect       int64 `json:"redirect_ori_page_user"`
 				ReadUserSource []struct {
 					UserCount int64  `json:"user_count"`
 					SceneDesc string `json:"scene_desc"`
@@ -181,7 +218,7 @@ func (s *Store) BizDays(ctx context.Context, since, until string) ([]BizDay, err
 		detail := payload.Detail
 		d.HasSummary = true
 		d.ReadUser, d.ShareUser, d.Zaikan, d.Like = detail.ReadUser, detail.ShareUser, detail.Zaikan, detail.Like
-		d.Comment, d.Collection, d.SendPages = detail.Comment, detail.Collection, detail.SendPages
+		d.Comment, d.Collection, d.SendPages, d.RedirectOriginal = detail.Comment, detail.Collection, detail.SendPages, detail.Redirect
 		for _, source := range detail.ReadUserSource {
 			d.Sources[source.SceneDesc] = source.UserCount
 		}
@@ -192,25 +229,29 @@ func (s *Store) BizDays(ctx context.Context, since, until string) ([]BizDay, err
 	}
 
 	followers, err := s.db.QueryContext(ctx, `
-		SELECT ref_date,
+		SELECT ref_date, COALESCE(CAST(json_extract(raw_json, '$.user_source') AS INTEGER), 0),
 			SUM(COALESCE(CAST(json_extract(raw_json, '$.new_user') AS INTEGER), 0)),
 			SUM(COALESCE(CAST(json_extract(raw_json, '$.cancel_user') AS INTEGER), 0)),
 			MAX(last_seen_at)
 		FROM official_api_rows
 		WHERE endpoint = 'getusersummary' AND ref_date >= ? AND ref_date <= ?
-		GROUP BY ref_date`, since, until)
+		GROUP BY 1, 2`, since, until)
 	if err != nil {
 		return nil, err
 	}
 	for followers.Next() {
 		var date string
+		var source int
 		var newUser, cancelUser, at int64
-		if err := followers.Scan(&date, &newUser, &cancelUser, &at); err != nil {
+		if err := followers.Scan(&date, &source, &newUser, &cancelUser, &at); err != nil {
 			followers.Close()
 			return nil, err
 		}
 		d := day(date)
-		d.HasFollower, d.NewUser, d.CancelUser = true, newUser, cancelUser
+		d.HasFollower = true
+		d.NewUser += newUser
+		d.CancelUser += cancelUser
+		d.NewBySource[source] += newUser
 		seen(d, at)
 	}
 	if err := followers.Close(); err != nil {

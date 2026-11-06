@@ -13,9 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -78,38 +78,88 @@ func integer(name string) feishu.FieldSpec {
 	return feishu.FieldSpec{Name: name, Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "0"}}
 }
 
-// 文章表里这些列归本服务写；作者、等级以外的人填列（国家、品类、父记录）一概不碰。
-// 前 9 列是表里原有的，后 4 列是新加的。
-var articleFields = []feishu.FieldSpec{
-	{Name: "内容标题", Type: feishu.FieldTypeText},
-	{Name: "内容url", Type: feishu.FieldTypeURL},
-	integer("发表日期"),
-	integer("阅读人数"),
-	integer("送达人数"),
-	{Name: "送达率", Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "0.00%"}},
-	{Name: "阅读完成率", Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "0.00%"}},
-	integer("分享"),
-	{Name: "关注", Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "1,000"}},
-	integer("在看"),
-	integer("点赞"),
-	integer("收藏"),
-	integer("留言"),
+func percentField(name string) feishu.FieldSpec {
+	return feishu.FieldSpec{Name: name, Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "0.00%"}}
 }
 
-var dayFields = []feishu.FieldSpec{
-	{Name: "日期", Type: feishu.FieldTypeDatetime, Property: map[string]interface{}{"date_formatter": "yyyy/MM/dd"}},
-	integer("阅读人数"), integer("分享人数"), integer("在看"), integer("点赞"), integer("留言"), integer("收藏"),
-	integer("发文篇数"),
-	integer("新增关注"), integer("取消关注"), integer("净增关注"),
-	{Name: "累计关注", Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "1,000"}},
-	integer("公众号消息阅读"), integer("推荐阅读"), integer("朋友圈阅读"), integer("聊天会话阅读"),
-	integer("主页阅读"), integer("搜一搜阅读"), integer("其他阅读"),
+func dateField(name string) feishu.FieldSpec {
+	return feishu.FieldSpec{Name: name, Type: feishu.FieldTypeDatetime, Property: map[string]interface{}{"date_formatter": "yyyy/MM/dd"}}
 }
 
-var daySourceColumns = []struct{ Scene, Column string }{
+const (
+	notifiedKind   = "群发"
+	unnotifiedKind = "仅发表"
+)
+
+// jumpColumns 对应微信 read_jump_position 的 position 1-5：读到文章哪一段跳出的人占多少。
+var jumpColumns = []string{"跳出0-20%", "跳出20-40%", "跳出40-60%", "跳出60-80%", "跳出80-100%"}
+
+// sourceColumns 是阅读来源（read_user_source 的 scene_desc）对应的列，文章表和每日数据表共用。
+var sourceColumns = []struct{ Scene, Column string }{
 	{"公众号消息", "公众号消息阅读"}, {"推荐", "推荐阅读"}, {"朋友圈", "朋友圈阅读"}, {"聊天会话", "聊天会话阅读"},
 	{"公众号主页", "主页阅读"}, {"搜一搜", "搜一搜阅读"}, {"其他", "其他阅读"},
 }
+
+// 文章表里这些列归本服务写，微信给的都写上（用户 2026-11-06：字段应多尽多）；
+// 作者、国家、品类这些人填的列一概不碰。首列「内容标题」是超链接，点开就是原文。
+var articleFields = func() []feishu.FieldSpec {
+	fields := []feishu.FieldSpec{
+		{Name: "内容标题", Type: feishu.FieldTypeURL},
+		dateField("发表日期"),
+		{Name: "发表方式", Type: feishu.FieldTypeSingleSelect, Property: map[string]interface{}{
+			"options": []map[string]interface{}{{"name": notifiedKind}, {"name": unnotifiedKind}},
+		}},
+		integer("第几条"),
+		integer("阅读人数"),
+		integer("送达人数"),
+		percentField("送达率"),
+		percentField("阅读完成率"),
+		integer("平均阅读秒数"),
+		integer("分享"),
+		{Name: "关注", Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "1,000"}},
+		integer("在看"),
+		integer("点赞"),
+		integer("收藏"),
+		integer("留言"),
+		{Name: "赞赏金额", Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "0.00"}},
+	}
+	for _, source := range sourceColumns {
+		fields = append(fields, integer(source.Column))
+	}
+	for _, column := range jumpColumns {
+		fields = append(fields, percentField(column))
+	}
+	return append(fields, dateField("数据截至"))
+}()
+
+// followSourceColumns 是 getusersummary 的 user_source（微信文档里的取值）对应的新增关注列；
+// 文档外的取值算进「其他关注」。
+var followSourceColumns = []struct {
+	Sources []int
+	Column  string
+}{
+	{[]int{57}, "文章内关注"}, {[]int{1}, "搜索关注"}, {[]int{17}, "名片分享关注"}, {[]int{30}, "扫码关注"},
+	{[]int{200}, "视频号关注"}, {[]int{201}, "直播关注"}, {[]int{161}, "他人转载关注"}, {[]int{100}, "广告关注"},
+	{[]int{149}, "小程序关注"}, {[]int{51}, "支付后关注"}, {[]int{0}, "其他关注"},
+}
+
+var dayFields = func() []feishu.FieldSpec {
+	fields := []feishu.FieldSpec{
+		dateField("日期"),
+		integer("阅读人数"), integer("分享人数"), integer("在看"), integer("点赞"), integer("留言"), integer("收藏"),
+		integer("发文篇数"),
+		integer("新增关注"), integer("取消关注"), integer("净增关注"),
+		{Name: "累计关注", Type: feishu.FieldTypeNumber, Property: map[string]interface{}{"formatter": "1,000"}},
+	}
+	for _, source := range sourceColumns {
+		fields = append(fields, integer(source.Column))
+	}
+	fields = append(fields, integer("阅读原文"))
+	for _, source := range followSourceColumns {
+		fields = append(fields, integer(source.Column))
+	}
+	return fields
+}()
 
 // Grade 是「等级」列的档位：满 1 万一档，10 万封顶，不到 1 万用全角空格（和导入时一致）。
 func Grade(readUser int64) string {
@@ -138,28 +188,43 @@ func articleRows(articles []archive.BizArticle, accounts map[string]string) []ro
 		if article.StatDate == "" {
 			continue // 还没有发表明细
 		}
+		kind := notifiedKind
+		if !article.Notified {
+			kind = unnotifiedKind
+		}
+		// 已有的行（接管来的、老表搬来的）也只拿到 update 这些列，所以微信给的都放这里。
 		metrics := map[string]interface{}{
-			"阅读人数":  article.ReadUser,
-			"送达人数":  article.Delivered(),
-			"送达率":   article.DeliveryRate,
-			"阅读完成率": article.FinishRate,
-			"分享":    article.ShareUser,
-			"关注":    article.Subscribe,
-			"在看":    article.Zaikan,
-			"点赞":    article.Like,
-			"收藏":    article.Collection,
-			"留言":    article.Comment,
+			"发表方式":   kind,
+			"第几条":    article.Position,
+			"阅读人数":   article.ReadUser,
+			"送达人数":   article.Delivered(),
+			"送达率":    article.DeliveryRate,
+			"阅读完成率":  article.FinishRate,
+			"平均阅读秒数": int64(math.Round(article.AvgMinutes * 60)),
+			"分享":     article.ShareUser,
+			"关注":     article.Subscribe,
+			"在看":     article.Zaikan,
+			"点赞":     article.Like,
+			"收藏":     article.Collection,
+			"留言":     article.Comment,
+			"赞赏金额":   float64(article.PraiseMoney) / 100,
+			"数据截至":   dayMillis(article.StatDate),
+		}
+		for _, source := range sourceColumns {
+			metrics[source.Column] = article.Sources[source.Scene]
+		}
+		for i, rate := range article.JumpRates {
+			metrics[jumpColumns[i]] = rate
 		}
 		if id := accounts[bizFromLink(article.URL)]; id != "" {
 			metrics[accountColumn] = []string{id}
 		}
 		create := map[string]interface{}{
-			"内容标题": article.Title,
-			"发表日期": dateNumber(article.PublishDate),
+			"发表日期": dayMillis(article.PublishDate),
 			"等级":   Grade(article.ReadUser),
 		}
 		if article.URL != "" {
-			create["内容url"] = map[string]string{"link": article.URL, "text": article.URL}
+			create["内容标题"] = map[string]string{"text": article.Title, "link": article.URL}
 		}
 		for name, value := range metrics {
 			create[name] = value
@@ -186,23 +251,34 @@ func articleRows(articles []archive.BizArticle, accounts map[string]string) []ro
 func dayRows(days []archive.BizDay, accountID string) []row {
 	rows := make([]row, 0, len(days))
 	for _, day := range days {
-		date, err := time.ParseInLocation("2006-01-02", day.Date, wechat.ShanghaiLoc())
-		if err != nil {
+		millis := dayMillis(day.Date)
+		if millis == 0 {
 			continue
 		}
-		fields := map[string]interface{}{"日期": date.UnixMilli()}
+		fields := map[string]interface{}{"日期": millis}
 		if accountID != "" {
 			fields[accountColumn] = []string{accountID}
 		}
 		if day.HasSummary {
 			fields["阅读人数"], fields["分享人数"], fields["在看"] = day.ReadUser, day.ShareUser, day.Zaikan
 			fields["点赞"], fields["留言"], fields["收藏"], fields["发文篇数"] = day.Like, day.Comment, day.Collection, day.SendPages
-			for _, source := range daySourceColumns {
+			for _, source := range sourceColumns {
 				fields[source.Column] = day.Sources[source.Scene]
 			}
+			fields["阅读原文"] = day.RedirectOriginal
 		}
 		if day.HasFollower {
 			fields["新增关注"], fields["取消关注"], fields["净增关注"] = day.NewUser, day.CancelUser, day.NetUser()
+			counted := int64(0)
+			for _, source := range followSourceColumns {
+				n := int64(0)
+				for _, code := range source.Sources {
+					n += day.NewBySource[code]
+				}
+				fields[source.Column] = n
+				counted += n
+			}
+			fields["其他关注"] = fields["其他关注"].(int64) + day.NewUser - counted
 		}
 		if day.HasCumulate {
 			fields["累计关注"] = day.Cumulate
@@ -212,9 +288,13 @@ func dayRows(days []archive.BizDay, accountID string) []row {
 	return rows
 }
 
-func dateNumber(date string) int64 {
-	n, _ := strconv.ParseInt(strings.ReplaceAll(date, "-", ""), 10, 64)
-	return n
+// dayMillis 把 YYYY-MM-DD 变成飞书日期列要的毫秒时间戳（上海当天零点）；认不出来给 0。
+func dayMillis(day string) int64 {
+	parsed, err := time.ParseInLocation("2006-01-02", day, wechat.ShanghaiLoc())
+	if err != nil {
+		return 0
+	}
+	return parsed.UnixMilli()
 }
 
 var (
@@ -404,12 +484,12 @@ func (w *Worker) adoptByLink(ctx context.Context, rows []row) (adopted, duplicat
 	for _, record := range mapped {
 		taken[record.RecordID] = true
 	}
-	records, err := w.Base.SearchRecords(w.ArticleTableID, []string{"内容url"})
+	records, err := w.Base.SearchRecords(w.ArticleTableID, []string{"内容标题"})
 	if err != nil {
 		return 0, 0, fmt.Errorf("read article table: %w", err)
 	}
 	for _, record := range records {
-		msgID := msgIDFromLink(record.Fields["内容url"])
+		msgID := msgIDFromLink(record.Fields["内容标题"])
 		if !unmapped[msgID] || taken[record.RecordID] {
 			continue
 		}
@@ -525,7 +605,7 @@ func (w *Worker) syncBase(ctx context.Context) (*BaseResult, error) {
 	today := w.now().In(wechat.ShanghaiLoc()).Format("2006-01-02")
 	result := &BaseResult{}
 
-	articles, err := w.Store.BizArticles(ctx, earliest(articleEndpoint), today)
+	articles, err := w.Store.BizArticlesAll(ctx, earliest(articleEndpoint), today)
 	if err != nil {
 		return result, err
 	}

@@ -178,14 +178,14 @@ func TestAdoptsExistingTableUpdatesOnlyMetricsAndLeavesHumanColumns(t *testing.T
 	worker, store, base := newWorker(t)
 	articles := base.table("tblArticles")
 	// 导入时的旧快照：等级按阅读数算的档；另一行有人手改了等级、填了作者。
-	articles["recA"] = map[string]interface{}{"内容url": link("100", "1"), "阅读人数": 5843.0, "等级": "　", "作者": "　"}
-	articles["recB"] = map[string]interface{}{"内容url": link("200", "1"), "阅读人数": 12000.0, "等级": "10万", "作者": "Mote莫特"}
+	articles["recA"] = map[string]interface{}{"内容标题": link("100", "1"), "阅读人数": 5843.0, "等级": "　", "作者": "　"}
+	articles["recB"] = map[string]interface{}{"内容标题": link("200", "1"), "阅读人数": 12000.0, "等级": "10万", "作者": "Mote莫特"}
 
 	save(t, store, "getarticletotaldetail", "2026-06-12",
 		article("100_1", "2026-06-12", 0, stat("2026-06-12", 5843, 4000, 0.01), stat("2026-07-11", 26301, 8742, 0.0135791515931)),
 		article("200_1", "2026-06-12", 0, stat("2026-07-11", 15000, 100, 0.001)),
 		article("300_1", "2026-06-12", 0, stat("2026-07-11", 9000, 0, 0)),
-		article("400_1", "2026-06-12", 1, stat("2026-07-11", 500, 0, 0)), // 只发表不群发，不进表
+		article("400_1", "2026-06-12", 1, stat("2026-07-11", 500, 0, 0)), // 只发表、没通知粉丝，也进表
 	)
 	save(t, store, "getarticletotaldetail", "2025-10-31", article("500_1", "2025-10-31", 0, stat("2025-11-01", 1, 0, 0))) // 早于接口最早有数的那天
 
@@ -193,7 +193,7 @@ func TestAdoptsExistingTableUpdatesOnlyMetricsAndLeavesHumanColumns(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Articles.Adopted != 2 || result.Articles.Updated != 2 || result.Articles.Created != 1 {
+	if result.Articles.Adopted != 2 || result.Articles.Updated != 2 || result.Articles.Created != 2 {
 		t.Fatalf("unexpected result: %+v", result.Articles)
 	}
 	a := articles["recA"]
@@ -207,13 +207,23 @@ func TestAdoptsExistingTableUpdatesOnlyMetricsAndLeavesHumanColumns(t *testing.T
 	if b["阅读人数"] != 15000.0 || b["等级"] != "10万" || b["作者"] != "Mote莫特" {
 		t.Fatalf("hand-set 等级 and 作者 must stay, got %v", b)
 	}
-	if len(articles) != 3 {
-		t.Fatalf("only the群发 article 300_1 is new, table has %d rows", len(articles))
+	if len(articles) != 4 {
+		t.Fatalf("300_1 and 400_1 are new, table has %d rows", len(articles))
 	}
+	june12 := float64(time.Date(2026, 6, 12, 0, 0, 0, 0, wechat.ShanghaiLoc()).UnixMilli())
+	kinds := map[string]int{}
 	for id, row := range articles {
-		if id != "recA" && id != "recB" && (row["等级"] != "　" || row["发表日期"] != 20260612.0 || row["送达人数"] != 0.0) {
+		if id == "recA" || id == "recB" {
+			continue
+		}
+		title, _ := row["内容标题"].(map[string]interface{})
+		if row["等级"] != "　" || row["发表日期"] != june12 || row["送达人数"] != 0.0 || msgIDFromLink(title) == "" || title["text"] == "" {
 			t.Fatalf("new row fields wrong: %v", row)
 		}
+		kinds[row["发表方式"].(string)]++
+	}
+	if kinds["群发"] != 1 || kinds["仅发表"] != 1 {
+		t.Fatalf("发表方式 should tell 群发 from 仅发表, got %v", kinds)
 	}
 
 	before := base.totalCalls()
@@ -228,7 +238,7 @@ func TestAdoptsExistingTableUpdatesOnlyMetricsAndLeavesHumanColumns(t *testing.T
 func TestRowDeletedInTableIsNotRecreated(t *testing.T) {
 	worker, store, base := newWorker(t)
 	articles := base.table("tblArticles")
-	articles["recA"] = map[string]interface{}{"内容url": link("100", "1"), "阅读人数": 1.0, "等级": "　"}
+	articles["recA"] = map[string]interface{}{"内容标题": link("100", "1"), "阅读人数": 1.0, "等级": "　"}
 	save(t, store, "getarticletotaldetail", "2026-06-12", article("100_1", "2026-06-12", 0, stat("2026-06-12", 10, 0, 0)))
 	if _, err := worker.syncBase(context.Background()); err != nil {
 		t.Fatal(err)
@@ -433,5 +443,72 @@ func TestAlertsOnceOnThirdFailureAndBacksOff(t *testing.T) {
 	base.fail = nil
 	if wait := worker.round(fallback); wait != fallback || len(alerts) != 1 {
 		t.Fatalf("recovery waits the fallback and does not alert again: wait=%s alerts=%d", wait, len(alerts))
+	}
+}
+
+// 微信给的文章字段都写上：阅读来源、跳出位置、平均阅读时长、赞赏、第几条、数据截至哪天。
+func TestArticleRowCarriesEveryWeChatField(t *testing.T) {
+	worker, store, base := newWorker(t)
+	detail := stat("2026-07-11", 408, 363, 0.000563823035918)
+	detail["praise_money"] = 1250
+	detail["read_avg_activetime"] = 0.380555123091
+	detail["read_user_source"] = []interface{}{
+		map[string]interface{}{"scene_desc": "公众号消息", "user_count": 363},
+		map[string]interface{}{"scene_desc": "推荐", "user_count": 14},
+		map[string]interface{}{"scene_desc": "搜一搜", "user_count": 1},
+		map[string]interface{}{"scene_desc": "全部", "user_count": 408},
+	}
+	detail["read_jump_position"] = []interface{}{
+		map[string]interface{}{"position": 3, "rate": 0.0105},
+		map[string]interface{}{"position": 5, "rate": 0.9526},
+	}
+	save(t, store, "getarticletotaldetail", "2026-06-12", article("100_2", "2026-06-12", 0, detail))
+	if _, err := worker.syncBase(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]interface{}
+	for _, r := range base.table("tblArticles") {
+		row = r
+	}
+	july11 := float64(time.Date(2026, 7, 11, 0, 0, 0, 0, wechat.ShanghaiLoc()).UnixMilli())
+	want := map[string]interface{}{
+		"第几条": 2.0, "赞赏金额": 12.5, "平均阅读秒数": 23.0, "数据截至": july11,
+		"公众号消息阅读": 363.0, "推荐阅读": 14.0, "搜一搜阅读": 1.0, "朋友圈阅读": 0.0,
+		"跳出0-20%": 0.0, "跳出40-60%": 0.0105, "跳出80-100%": 0.9526,
+	}
+	for name, value := range want {
+		if row[name] != value {
+			t.Fatalf("%s = %v, want %v (row %v)", name, row[name], value, row)
+		}
+	}
+}
+
+// 每日数据也带上点「阅读原文」的人数和新增关注按来源拆开；文档外的来源算进「其他关注」。
+func TestDayRowSplitsFollowSources(t *testing.T) {
+	worker, store, base := newWorker(t)
+	save(t, store, "getarticletotaldetail", "2026-06-12", article("100_1", "2026-06-12", 0, stat("2026-06-12", 10, 0, 0)))
+	save(t, store, "getbizsummary", "2026-11-05", map[string]interface{}{"ref_date": "2026-11-05", "detail": map[string]interface{}{
+		"read_user": 19388, "redirect_ori_page_user": 2, "send_page_count": 5,
+	}})
+	save(t, store, "getusersummary", "2026-11-05",
+		map[string]interface{}{"ref_date": "2026-11-05", "user_source": 57, "new_user": 40, "cancel_user": 0},
+		map[string]interface{}{"ref_date": "2026-11-05", "user_source": 1, "new_user": 15, "cancel_user": 0},
+		map[string]interface{}{"ref_date": "2026-11-05", "user_source": 0, "new_user": 3, "cancel_user": 9},
+		map[string]interface{}{"ref_date": "2026-11-05", "user_source": 999, "new_user": 2, "cancel_user": 0},
+	)
+	if _, err := worker.syncBase(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var row map[string]interface{}
+	for _, r := range base.table("tblDaily") {
+		row = r
+	}
+	want := map[string]interface{}{
+		"阅读原文": 2.0, "新增关注": 60.0, "取消关注": 9.0, "文章内关注": 40.0, "搜索关注": 15.0, "其他关注": 5.0, "视频号关注": 0.0,
+	}
+	for name, value := range want {
+		if row[name] != value {
+			t.Fatalf("%s = %v, want %v (row %v)", name, row[name], value, row)
+		}
 	}
 }

@@ -35,14 +35,14 @@ func linkedIDs(value interface{}) []string {
 func TestRowsAddedAfterFirstAdoptionAreAdoptedByLink(t *testing.T) {
 	worker, store, base := newWorker(t)
 	articles := base.table("tblArticles")
-	articles["recNew"] = map[string]interface{}{"内容url": link("900", "1"), "阅读人数": 1.0, "等级": "　"}
+	articles["recNew"] = map[string]interface{}{"内容标题": link("900", "1"), "阅读人数": 1.0, "等级": "　"}
 	save(t, store, "getarticletotaldetail", "2026-06-12", article("900_1", "2026-06-12", 0, stat("2026-06-12", 10, 0, 0)))
 	if _, err := worker.syncBase(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	// 之后有人把 2025-12 的老文章搬进表里，接口里也有这篇。
-	articles["recMoved"] = map[string]interface{}{"内容url": link("800", "2"), "阅读人数": 5000.0, "等级": "　", "作者": "Sage"}
+	articles["recMoved"] = map[string]interface{}{"内容标题": link("800", "2"), "阅读人数": 5000.0, "等级": "　", "作者": "Sage"}
 	save(t, store, "getarticletotaldetail", "2025-12-03", article("800_2", "2025-12-03", 0, stat("2026-01-01", 12000, 0, 0)))
 	result, err := worker.syncBase(context.Background())
 	if err != nil {

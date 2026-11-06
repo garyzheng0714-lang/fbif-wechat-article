@@ -92,7 +92,7 @@ func kpiTiles(items []kpi, link string) map[string]interface{} {
 			note = grey("—")
 		}
 		elements := []interface{}{
-			map[string]interface{}{"tag": "markdown", "content": item.label, "text_size": "notation", "text_color": "grey"},
+			map[string]interface{}{"tag": "markdown", "content": grey(item.label), "text_size": "notation"},
 			map[string]interface{}{"tag": "markdown", "content": "**" + item.value + "**", "text_size": "heading-1", "margin": "4px 0px 0px 0px"},
 			map[string]interface{}{"tag": "markdown", "content": note, "text_size": "notation", "margin": "2px 0px 0px 0px"},
 		}

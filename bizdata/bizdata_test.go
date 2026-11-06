@@ -293,6 +293,7 @@ func TestDailyCardWaitsForDataAndIsSentOnce(t *testing.T) {
 		uuids = append(uuids, uuid)
 		return "om_1", nil
 	}
+	seedDay(t, store, "2026-10-29", 20000, 4) // 上周同一天
 	seedDay(t, store, "2026-11-04", 15000, 4)
 	seedDay(t, store, "2026-11-05", 19388, 5)
 	yesterday := []interface{}{
@@ -323,9 +324,11 @@ func TestDailyCardWaitsForDataAndIsSentOnce(t *testing.T) {
 		t.Fatalf("daily card must be sent exactly once, got %d %v", len(sent), uuids)
 	}
 	encoded, _ := json.Marshal(sent[0])
-	text := string(encoded)
-	for _, want := range []string{`"template":"wathet"`, `"content":"公众号日报"`, "11月5日 周四", "19,388", "↑ 29.3%", "+60", "新增 70 取关 10", "645,251",
-		"interactive_container", "近 7 天发文 3 篇", `"tag":"table"`, "打开数据表"} {
+	text := unescapeJSON(encoded)
+	for _, want := range []string{`"template":"wathet"`, `"content":"公众号日报"`, "11月5日 周四", "19,388",
+		"<text_tag color='green'>日环比 ↑29.3%</text_tag>", "<text_tag color='red'>周同比 ↓3.1%</text_tag>", "+60",
+		"<text_tag color='neutral'>新增 70</text_tag>", "<text_tag color='neutral'>取关 10</text_tag>", "645,251", "近 30 天 —",
+		"interactive_container", "近 7 天发文 3 篇", `"tag":"table"`, `"row_height":"low"`, "打开数据表"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("card missing %q: %s", want, text)
 		}
@@ -337,6 +340,11 @@ func TestDailyCardWaitsForDataAndIsSentOnce(t *testing.T) {
 	if first < 0 || !(first < second && second < third) {
 		t.Fatalf("articles must be newest first, lead article first: %d %d %d", first, second, third)
 	}
+}
+
+// unescapeJSON 把 json.Marshal 转义掉的 < > & 换回来，好直接比 markdown 里的 <text_tag>。
+func unescapeJSON(encoded []byte) string {
+	return strings.NewReplacer(`\u003c`, "<", `\u003e`, ">", `\u0026`, "&").Replace(string(encoded))
 }
 
 func TestWeeklyCardOnlyOnMonday(t *testing.T) {
@@ -353,6 +361,9 @@ func TestWeeklyCardOnlyOnMonday(t *testing.T) {
 	for day := 1; day <= 8; day++ {
 		seedDay(t, store, fmt.Sprintf("2026-11-%02d", day), 12000, 3)
 	}
+	for day := 3; day <= 9; day++ { // 去年同一周（往前 52 周，2025-11-03 也是周一）
+		seedDay(t, store, fmt.Sprintf("2025-11-%02d", day), 6000, 3)
+	}
 	save(t, store, "getarticletotaldetail", "2026-11-08")
 	worker.Now = func() time.Time { return time.Date(2026, 11, 9, 8, 10, 0, 0, wechat.ShanghaiLoc()) } // 周一
 	if _, err := worker.sendReports(context.Background()); err != nil {
@@ -366,7 +377,8 @@ func TestWeeklyCardOnlyOnMonday(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(card)
-	if text := string(encoded); !strings.Contains(text, "11月2日–11月8日") || !strings.Contains(text, "84,000") || !strings.Contains(text, "↑ 16.7%") {
+	if text := unescapeJSON(encoded); !strings.Contains(text, "11月2日–11月8日") || !strings.Contains(text, "84,000") ||
+		!strings.Contains(text, "周环比 ↑16.7%") || !strings.Contains(text, "年同比 ↑100%") || !strings.Contains(text, "近一年 0") {
 		t.Fatalf("weekly totals wrong: %s", encoded)
 	}
 }

@@ -60,41 +60,47 @@ func percent(rate float64) string {
 	return fmt.Sprintf("%.1f%%", rate*100)
 }
 
-// change 是和上一期比的涨跌，上一期没有数据时为空。
-func change(current, previous int64, ok bool) string {
+// tag 是卡片里的小标签，和排版工具审核卡、贴图发布卡片用的同一种 markdown text_tag。
+func tag(color, text string) string { return "<text_tag color='" + color + "'>" + text + "</text_tag>" }
+
+// compare 是一条同比或环比标签，照团队「近期审批效率一览」卡片的样子：名目和涨跌写在一个小标签里，涨绿、跌红、持平灰；
+// 比的那期没采到数据就写「—」，标签照样占一行，四块等高。
+func compare(label string, current, previous int64, ok bool) string {
 	if !ok || previous <= 0 {
-		return ""
+		return tag("neutral", label+" —")
 	}
 	delta := float64(current-previous) / float64(previous) * 100
+	format := "%s %s%.1f%%"
+	if math.Abs(delta) >= 100 {
+		format = "%s %s%.0f%%"
+	}
 	switch {
 	case math.Abs(delta) < 0.05:
-		return "<font color='grey'>持平</font>"
+		return tag("neutral", label+" 持平")
 	case delta > 0:
-		return fmt.Sprintf("<font color='green'>↑ %.1f%%</font>", delta)
+		return tag("green", fmt.Sprintf(format, label, "↑", delta))
 	default:
-		return fmt.Sprintf("<font color='red'>↓ %.1f%%</font>", -delta)
+		return tag("red", fmt.Sprintf(format, label, "↓", -delta))
 	}
 }
 
 func grey(text string) string { return "<font color='grey'>" + text + "</font>" }
 
 type kpi struct {
-	label, value, note string
+	label, value string
+	tags         [2]string // 数字下面两行小标签：阅读、分享是环比和同比，关注是新增/取关、累计涨了多少
 }
 
 // kpiTiles 四块数字，电脑上一排四块，手机上两两一排。每块白底细外框、圆角，整块点开 link（每日数据表）；
-// 没有表可开时退成浅灰底块（交互容器必须带跳转）。四块都是三行，高度一样。
+// 没有表可开时退成浅灰底块（交互容器必须带跳转）。每块都是名目、数字、两行标签，高度一样。
 func kpiTiles(items []kpi, link string) map[string]interface{} {
 	columns := make([]interface{}, 0, len(items))
 	for _, item := range items {
-		note := item.note
-		if note == "" {
-			note = grey("—")
-		}
 		elements := []interface{}{
 			map[string]interface{}{"tag": "markdown", "content": grey(item.label), "text_size": "notation"},
 			map[string]interface{}{"tag": "markdown", "content": "**" + item.value + "**", "text_size": "heading-1", "margin": "4px 0px 0px 0px"},
-			map[string]interface{}{"tag": "markdown", "content": note, "text_size": "notation", "margin": "2px 0px 0px 0px"},
+			map[string]interface{}{"tag": "markdown", "content": item.tags[0], "text_size": "notation", "margin": "6px 0px 0px 0px"},
+			map[string]interface{}{"tag": "markdown", "content": item.tags[1], "text_size": "notation", "margin": "4px 0px 0px 0px"},
 		}
 		tile := map[string]interface{}{"tag": "column", "width": "weighted", "weight": 1, "vertical_spacing": "0px"}
 		if link != "" {
@@ -134,7 +140,8 @@ type articleColumn struct {
 }
 
 // 卡片用飞书默认宽度（电脑上约 600px，用户 2026-11-06 嫌铺满聊天窗口太宽）。列宽按比例：标题 40%，五个数字列各 12%，
-// 标题折成两行，六列一屏看全；手机上标题列冻结、左右滑看数字。
+// 六列一屏看全；行高固定一行（row_height low），标题放不下就省略、悬停或点开看全，不撑高行（用户 2026-11-06）；
+// 手机上标题列冻结、左右滑看数字。
 var (
 	colTitle  = articleColumn{"title", "文章", "lark_md", "40%", func(a archive.BizArticle) interface{} { return articleLink(a) }}
 	colDate   = articleColumn{"date", "发表", "text", "12%", func(a archive.BizArticle) interface{} { return a.PublishDate[5:] }}
@@ -171,7 +178,7 @@ func articleTable(articles []archive.BizArticle, columns ...articleColumn) map[s
 	}
 	pageSize := min(max(len(articles), 1), 10)
 	return map[string]interface{}{
-		"tag": "table", "page_size": pageSize, "row_height": "auto",
+		"tag": "table", "page_size": pageSize, "row_height": "low",
 		"freeze_first_column": true,
 		"header_style": map[string]interface{}{
 			"text_align": "left", "text_size": "normal", "background_style": "grey", "text_color": "grey", "bold": true, "lines": 1,
@@ -239,25 +246,27 @@ func dayByDate(days []archive.BizDay) map[string]archive.BizDay {
 	return byDate
 }
 
-// followerNote 净增关注那块下面一行：新增、取关各多少。不加「·」：电脑上一块约 138px 宽，四位数以内排得下一行，四块等高。
-func followerNote(newUser, cancelUser int64) string {
-	return grey(fmt.Sprintf("新增 %s 取关 %s", formatInt(newUser), formatInt(cancelUser)))
+// followerTags 净增关注那块的两行：新增、取关各多少。
+func followerTags(newUser, cancelUser int64) [2]string {
+	return [2]string{tag("neutral", "新增 "+formatInt(newUser)), tag("neutral", "取关 "+formatInt(cancelUser))}
 }
 
-// growthNote 累计关注那块下面一行：比 since 那天多了多少；那天没采到就空着。
-func growthNote(label string, current archive.BizDay, since archive.BizDay, ok bool) string {
+// growth 累计关注那块的一行：比 since 那天多了多少；那天没采到就写「—」。
+func growth(label string, current archive.BizDay, since archive.BizDay, ok bool) string {
 	if !ok || !since.HasCumulate || !current.HasCumulate {
-		return ""
+		return tag("neutral", label+" —")
 	}
-	return grey(label + " " + formatSigned(current.Cumulate-since.Cumulate))
+	return tag("neutral", label+" "+formatSigned(current.Cumulate-since.Cumulate))
 }
 
 // DailyCard 是 date（昨天）的日报：昨天账号的四个数，加上近 7 天（含昨天）发的全部文章，最近发的在最上面。
+// 阅读、分享和前一天比（日环比），也和上周同一天比（周同比）：公众号每天发文篇数不同，单看日环比起伏太大。
 func (w *Worker) DailyCard(ctx context.Context, date time.Time) (map[string]interface{}, error) {
 	day := date.Format("2006-01-02")
 	previous := date.AddDate(0, 0, -1).Format("2006-01-02")
 	weekAgo := date.AddDate(0, 0, -7).Format("2006-01-02")
-	days, err := w.Store.BizDays(ctx, weekAgo, day)
+	monthAgo := date.AddDate(0, 0, -30).Format("2006-01-02")
+	days, err := w.Store.BizDays(ctx, monthAgo, day)
 	if err != nil {
 		return nil, err
 	}
@@ -268,12 +277,20 @@ func (w *Worker) DailyCard(ctx context.Context, date time.Time) (map[string]inte
 	}
 	before, hasBefore := byDate[previous]
 	lastWeek, hasLastWeek := byDate[weekAgo]
+	lastMonth, hasLastMonth := byDate[monthAgo]
+	hasBefore, hasLastWeek = hasBefore && before.HasSummary, hasLastWeek && lastWeek.HasSummary
 
 	elements := []interface{}{kpiTiles([]kpi{
-		{"阅读人数", formatInt(today.ReadUser), change(today.ReadUser, before.ReadUser, hasBefore && before.HasSummary)},
-		{"分享人数", formatInt(today.ShareUser), change(today.ShareUser, before.ShareUser, hasBefore && before.HasSummary)},
-		{"净增关注", formatSigned(today.NetUser()), followerNote(today.NewUser, today.CancelUser)},
-		{"累计关注", formatInt(today.Cumulate), growthNote("近 7 天", today, lastWeek, hasLastWeek)},
+		{"阅读人数", formatInt(today.ReadUser), [2]string{
+			compare("日环比", today.ReadUser, before.ReadUser, hasBefore),
+			compare("周同比", today.ReadUser, lastWeek.ReadUser, hasLastWeek)}},
+		{"分享人数", formatInt(today.ShareUser), [2]string{
+			compare("日环比", today.ShareUser, before.ShareUser, hasBefore),
+			compare("周同比", today.ShareUser, lastWeek.ShareUser, hasLastWeek)}},
+		{"净增关注", formatSigned(today.NetUser()), followerTags(today.NewUser, today.CancelUser)},
+		{"累计关注", formatInt(today.Cumulate), [2]string{
+			growth("近 7 天", today, lastWeek, hasLastWeek),
+			growth("近 30 天", today, lastMonth, hasLastMonth)}},
 	}, w.dailyTableURL(ctx))}
 
 	recent, err := w.Store.BizArticles(ctx, date.AddDate(0, 0, -6).Format("2006-01-02"), day)
@@ -309,7 +326,8 @@ func sumWeek(days []archive.BizDay, from, to string) weekTotals {
 	return totals
 }
 
-// WeeklyCard 是 monday 那周（周一到周日）的周报：一周合计和上一周比，加上这周发的全部文章，最近发的在最上面。
+// WeeklyCard 是 monday 那周（周一到周日）的周报：一周合计和上一周比（周环比），也和去年同一周比（年同比，往前 52 周、
+// 星期对齐），加上这周发的全部文章，最近发的在最上面。比的那周 7 天没采齐就不比。
 func (w *Worker) WeeklyCard(ctx context.Context, monday time.Time) (map[string]interface{}, error) {
 	sunday := monday.AddDate(0, 0, 6)
 	from, to := monday.Format("2006-01-02"), sunday.Format("2006-01-02")
@@ -323,10 +341,17 @@ func (w *Worker) WeeklyCard(ctx context.Context, monday time.Time) (map[string]i
 	if this.days == 0 {
 		return nil, fmt.Errorf("no account data for week %s", from)
 	}
-	hasLast := last.days == 7
+	yearFrom, yearTo := monday.AddDate(0, 0, -364).Format("2006-01-02"), sunday.AddDate(0, 0, -364).Format("2006-01-02")
+	yearDays, err := w.Store.BizDays(ctx, yearFrom, yearTo)
+	if err != nil {
+		return nil, err
+	}
+	lastYear := sumWeek(yearDays, yearFrom, yearTo)
+	hasLast, hasLastYear := last.days == 7, lastYear.days == 7
 	byDate := dayByDate(days)
 	end, hasEnd := byDate[to]
 	start, hasStart := byDate[fourWeeksAgo]
+	yearEnd, hasYearEnd := dayByDate(yearDays)[yearTo]
 	cumulate := ""
 	if hasEnd && end.HasCumulate {
 		cumulate = formatInt(end.Cumulate)
@@ -338,10 +363,16 @@ func (w *Worker) WeeklyCard(ctx context.Context, monday time.Time) (map[string]i
 		return nil, err
 	}
 	elements := []interface{}{kpiTiles([]kpi{
-		{"阅读人数", formatInt(this.read), change(this.read, last.read, hasLast)},
-		{"分享人数", formatInt(this.share), change(this.share, last.share, hasLast)},
-		{"净增关注", formatSigned(this.newUser - this.cancelUser), followerNote(this.newUser, this.cancelUser)},
-		{"累计关注", cumulate, growthNote("近 4 周", end, start, hasEnd && hasStart)},
+		{"阅读人数", formatInt(this.read), [2]string{
+			compare("周环比", this.read, last.read, hasLast),
+			compare("年同比", this.read, lastYear.read, hasLastYear)}},
+		{"分享人数", formatInt(this.share), [2]string{
+			compare("周环比", this.share, last.share, hasLast),
+			compare("年同比", this.share, lastYear.share, hasLastYear)}},
+		{"净增关注", formatSigned(this.newUser - this.cancelUser), followerTags(this.newUser, this.cancelUser)},
+		{"累计关注", cumulate, [2]string{
+			growth("近 4 周", end, start, hasEnd && hasStart),
+			growth("近一年", end, yearEnd, hasEnd && hasYearEnd)}},
 	}, w.dailyTableURL(ctx))}
 	if len(articles) > 0 {
 		elements = append(elements, heading(fmt.Sprintf("这周发文 %d 篇", len(articles))),

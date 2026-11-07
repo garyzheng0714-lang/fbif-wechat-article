@@ -349,3 +349,48 @@ func TestLabelsLeaveAccountsTheFeedDoesNotCollectBlank(t *testing.T) {
 		}
 	}
 }
+
+// 递过去的正文：属性、注释去掉，文字和整页开头一样；再大的页面一篇也不超过 64KB，12 篇一次不到 1MB。
+func TestClassifyContentKeepsTheTextTheFeedSummarizes(t *testing.T) {
+	page := `<!-- 注释 --><section style="margin:0;padding:0" data-x="1"><p class="a">中&amp;国 <strong>酸奶</strong></p><img src="x.png" data-src="y"/><br></section>`
+	if got := classifyContent(page); got != `<section><p>中&amp;国 <strong>酸奶</strong></p><img/><br></section>` {
+		t.Fatalf("got %q", got)
+	}
+	style := ` style="` + strings.Repeat("font-size:15px;", 200) + `"`
+	var huge strings.Builder
+	for huge.Len() < 2_600_000 {
+		huge.WriteString(`<p` + style + `><span` + style + `>新品上市第` + strconv.Itoa(huge.Len()) + `段文字</span></p>`)
+	}
+	got := classifyContent(huge.String())
+	if len(got) > classifyContentBytes+1024 || !strings.HasPrefix(got, "<p><span>新品上市第0段文字</span></p>") {
+		t.Fatalf("a 2.6MB page shrinks to its first text: %d bytes, %q", len(got), got[:min(len(got), 80)])
+	}
+	if text := []rune(strings.Join(strings.Fields(htmlText(got)), "")); len(text) < classifyContentText {
+		t.Fatalf("keeps at least %d characters, far more than the 180 the feed uses, got %d", classifyContentText, len(text))
+	}
+
+	worker, rows, pages, feed := newLabelWorker(t)
+	var sizes []int64
+	inner := feed.serve
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/internal/wechat-article-labels/classify" {
+			sizes = append(sizes, r.ContentLength)
+		}
+		inner(w, r)
+	}))
+	defer server.Close()
+	worker.FeedURL = server.URL
+	for i := 0; i < classifyBatch; i++ {
+		mid := strconv.Itoa(4000 + i)
+		rows["rec"+mid] = map[string]interface{}{"内容标题": titled(mid, "1", "大页面"+mid), "发表日期": dayMs(2026, 9, 1)}
+		pages.pages[articleLink(mid, "1")] = originalPage(huge.String())
+		feed.answers[mid+"_1"] = []string{"food"}
+	}
+	worker.labelRound(context.Background(), 6*time.Hour)
+	if len(sizes) != 1 || sizes[0] <= 0 || sizes[0] >= 1<<20 {
+		t.Fatalf("12 huge pages in one request under nginx's 1MB: %v", sizes)
+	}
+	if !reflect.DeepEqual(options(rows["rec4000"]["品类"]), []string{"食品"}) {
+		t.Fatalf("got %v", rows["rec4000"]["品类"])
+	}
+}

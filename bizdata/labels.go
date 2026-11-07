@@ -142,11 +142,13 @@ type classifyArticle struct {
 
 // feedClassify 把文章递给资讯订阅的只分类接口，回 key → 标签；模型这一批没答的不在里面。
 func (w *Worker) feedClassify(ctx context.Context, biz string, articles []classifyArticle) (map[string][]string, error) {
-	payload, err := json.Marshal(map[string]interface{}{"biz": biz, "articles": articles})
-	if err != nil {
+	var payload bytes.Buffer
+	encoder := json.NewEncoder(&payload)
+	encoder.SetEscapeHTML(false) // 正文全是尖括号，转成 \u003c 要大好几倍
+	if err := encoder.Encode(map[string]interface{}{"biz": biz, "articles": articles}); err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.FeedURL, "/")+"/api/internal/wechat-article-labels/classify", bytes.NewReader(payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(w.FeedURL, "/")+"/api/internal/wechat-article-labels/classify", &payload)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +419,7 @@ func (w *Worker) classifyOwn(ctx context.Context, biz string, tasks []labelTask,
 				}
 				content = pageContentHTML(page)
 			}
-			contents[task.msgID] = content
+			contents[task.msgID] = classifyContent(content)
 		}
 		ready = append(ready, task)
 		if len(ready) >= classifyBatch {

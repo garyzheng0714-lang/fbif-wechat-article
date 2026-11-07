@@ -45,9 +45,12 @@ type Worker struct {
 	// labelBudgetUntil 前资讯订阅的历史补算额度用完了，不再读网页、递文章。
 	labelBudgetUntil time.Time
 
-	// 补作者和补品类国家共用的读网页闸口：两次之间至少隔 FetchGap；pageVerifications 是连着被微信要求验证几次。
-	pageMu            sync.Mutex
-	pageVerifications int
+	// 补作者和补品类国家共用的读网页闸口：两次之间至少隔 FetchGap；pageFailures 是连着几篇没读成（文章已删不算），
+	// pagesDown 是已经当作服务器读不了网页、找过人了，lastGoodPage 是上次读成的那篇，用来分清是服务器的事还是那几篇的事。
+	pageMu       sync.Mutex
+	pageFailures int
+	pagesDown    bool
+	lastGoodPage string
 }
 
 type RunResult struct {

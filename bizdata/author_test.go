@@ -76,6 +76,76 @@ func TestReprintsFromOneAccountKeepOneName(t *testing.T) {
 	}
 }
 
+// 2026-11-06 首轮写的转载行没记公众号编号：服务里自己读网页补上，同一个号统一成最早写下的写法；写之后有人改过的格子不碰。
+func TestReprintRowsGetTheirSourceAndOneName(t *testing.T) {
+	worker, base, pages := newAuthorWorker(t)
+	ctx := context.Background()
+	rows := base.table("tblArticles")
+	other := strings.NewReplacer("gh_90bc6f3429f4", "gh_44e51cde40c7", "Gooods好味司</span>", "凤凰WEEKLY</span>").Replace(reprintPage)
+	seed := []struct{ id, mid, value, page string }{
+		{"recFirst", "100", "Gooods 好味司", reprintPage}, // 最早写下的写法
+		{"recLater", "200", "Gooods好味司", reprintPage},
+		{"recEdited", "300", "好味司Gooods", reprintPage}, // 写之后有人改成了 Bobo
+		{"recGonePage", "400", "某号", ""},
+		{"recDeleted", "500", "某号", reprintPage},
+		{"recOther", "600", "凤凰WEEKLY", other},
+	}
+	first := time.Date(2026, 11, 6, 20, 0, 0, 0, time.UTC)
+	for i, row := range seed {
+		if err := worker.Store.SaveBizAuthor(ctx, row.id, row.mid+"_1", archive.AuthorWritten, row.value, "转载", "", first.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if row.id != "recDeleted" {
+			rows[row.id] = map[string]interface{}{"内容标题": titled(row.mid, "1", "转载"+row.mid), "作者": row.value}
+		}
+		if row.page != "" {
+			pages.pages[articleLink(row.mid, "1")] = row.page
+		}
+	}
+	rows["recEdited"]["作者"] = "Bobo"
+	pages.errs[articleLink("400", "1")] = errPageGone
+
+	// 被微信要求验证：停下退避，一行都不记。
+	pages.errs[articleLink("600", "1")] = errVerification
+	if wait := worker.authorRound(ctx, 6*time.Hour); wait != time.Minute || len(pages.fetched) != 1 {
+		t.Fatalf("verification stops the backfill: wait %s, fetched %v", wait, pages.fetched)
+	}
+	if reprints, _ := worker.Store.BizAuthorReprints(ctx); len(reprints) != 6 || reprints[5].Source != "" {
+		t.Fatalf("nothing recorded while blocked, got %v", reprints)
+	}
+	delete(pages.errs, articleLink("600", "1"))
+
+	result, err := worker.fillAuthors(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sourced != 4 || result.Unified != 1 || result.Left != 0 {
+		t.Fatalf("4 sources found, 1 row unified, got %+v", result)
+	}
+	if rows["recLater"]["作者"] != "Gooods 好味司" || rows["recFirst"]["作者"] != "Gooods 好味司" || rows["recOther"]["作者"] != "凤凰WEEKLY" {
+		t.Fatalf("one account one name, the first written: %v / %v / %v", rows["recFirst"]["作者"], rows["recLater"]["作者"], rows["recOther"]["作者"])
+	}
+	if rows["recEdited"]["作者"] != "Bobo" {
+		t.Fatalf("a cell someone changed is left alone, got %v", rows["recEdited"]["作者"])
+	}
+	done, _ := worker.Store.BizAuthorRecords(ctx)
+	if done["recEdited"] != archive.AuthorKept || done["recDeleted"] != archive.AuthorGone || done["recGonePage"] != archive.AuthorWritten {
+		t.Fatalf("edited → kept, deleted row → gone, gone page keeps its name: %v", done)
+	}
+	reprints, _ := worker.Store.BizAuthorReprints(ctx)
+	for _, row := range reprints {
+		if row.Source == "" || row.RecordID == "recGonePage" {
+			t.Fatalf("every reprint row left has a source, the gone page drops out: %v", reprints)
+		}
+	}
+
+	fetched := len(pages.fetched)
+	again, err := worker.fillAuthors(ctx)
+	if err != nil || again.Sourced+again.Unified != 0 || len(pages.fetched) != fetched {
+		t.Fatalf("nothing left to do: %+v %v, fetched %d more", again, err, len(pages.fetched)-fetched)
+	}
+}
+
 func TestJSUnescape(t *testing.T) {
 	if got := jsUnescape(`\x3cp\x3e中\x26amp;\'x\'\n`); got != "<p>中&amp;'x'\n" {
 		t.Fatalf("jsUnescape = %q", got)
@@ -188,12 +258,13 @@ func TestNewRowsWakeAuthorFilling(t *testing.T) {
 	}
 }
 
-func TestAuthorFillingStopsOnRepeatedFailuresAndAlertsOnce(t *testing.T) {
+// 网页一篇都读不成（断网、微信整体打不开）是服务器的事：连着 3 篇没读成就整轮停、退避、找人一次，不算到哪一行头上；恢复后照常补。
+func TestAuthorFillingStopsWhenNoPageCanBeReadWithoutGivingUpRows(t *testing.T) {
 	worker, base, pages := newAuthorWorker(t)
 	rows := base.table("tblArticles")
 	for _, mid := range []string{"1", "2", "3", "4", "5"} {
 		rows["rec"+mid] = map[string]interface{}{"内容标题": titled(mid, "1", "标题"+mid)}
-		pages.errs[articleLink(mid, "1")] = errors.New("article page has no content")
+		pages.errs[articleLink(mid, "1")] = errors.New("dial tcp: i/o timeout")
 	}
 	var alerts []string
 	worker.Alert = func(message string) { alerts = append(alerts, message) }
@@ -202,23 +273,74 @@ func TestAuthorFillingStopsOnRepeatedFailuresAndAlertsOnce(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		waits = append(waits, worker.authorRound(context.Background(), 6*time.Hour))
 	}
-	// 每轮连着 3 篇打不开就停；前三轮都卡在最新的 3 篇上，第四轮只剩 2 篇、全打不开也算失败。
-	if len(pages.fetched) != 11 {
-		t.Fatalf("each round should stop after 3 failed pages in a row, fetched %d", len(pages.fetched))
+	// 第一轮读到第 3 篇停；之后每轮读一篇看恢复没有。
+	if len(pages.fetched) != 6 {
+		t.Fatalf("stop after 3 failed pages, then one page a round, fetched %d", len(pages.fetched))
 	}
 	if waits[0] != time.Minute || waits[1] != 2*time.Minute || waits[2] != 4*time.Minute || waits[3] != 8*time.Minute {
 		t.Fatalf("should back off from 1 minute, got %v", waits)
 	}
-	if len(alerts) != 1 || !strings.Contains(alerts[0], "连续 3 次失败") {
-		t.Fatalf("alert exactly once on the third failed round, got %v", alerts)
+	if len(alerts) != 1 || !strings.Contains(alerts[0], "连续 3 篇没读成") {
+		t.Fatalf("alert exactly once when pages stop loading, got %v", alerts)
 	}
-	// 同一行连着 3 次打不开就不再试，留空。
-	done, err := worker.Store.BizAuthorRecords(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if done, _ := worker.Store.BizAuthorRecords(context.Background()); len(done) != 0 {
+		t.Fatalf("no row should be given up while the server cannot read pages, got %v", done)
 	}
-	if done["rec5"] != archive.AuthorNone || done["rec4"] != archive.AuthorNone || done["rec3"] != archive.AuthorNone {
-		t.Fatalf("rows that failed 3 times should be given up, got %v", done)
+
+	for _, mid := range []string{"1", "2", "3", "4", "5"} {
+		delete(pages.errs, articleLink(mid, "1"))
+		pages.pages[articleLink(mid, "1")] = originalPage(`<p>作者：Milo</p>`)
+	}
+	if wait := worker.authorRound(context.Background(), 6*time.Hour); wait != 0 {
+		t.Fatalf("round should succeed once pages load again, got wait %s", wait)
+	}
+	for _, mid := range []string{"1", "2", "3", "4", "5"} {
+		if rows["rec"+mid]["作者"] != "Milo" {
+			t.Fatalf("rec%s should be filled after recovery, got %v", mid, rows["rec"+mid])
+		}
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("recovery does not alert, got %v", alerts)
+	}
+}
+
+// 只是那几篇自己读不成（别的读得成）：每轮记一次，3 次后留空；连着 3 篇读不成时拿上次读成的那篇对照，读得成就不当作服务器的事。
+func TestAuthorRowsThatNeverLoadAreGivenUpAfterThreeTries(t *testing.T) {
+	worker, base, pages := newAuthorWorker(t)
+	rows := base.table("tblArticles")
+	rows["recGood"] = map[string]interface{}{"内容标题": titled("1", "1", "读得成")}
+	pages.pages[articleLink("1", "1")] = originalPage(`<p>作者：Milo</p>`)
+	if wait := worker.authorRound(context.Background(), 6*time.Hour); wait != 0 {
+		t.Fatalf("first round should succeed, got %s", wait)
+	}
+	for _, mid := range []string{"7", "8", "9"} {
+		rows["rec"+mid] = map[string]interface{}{"内容标题": titled(mid, "1", "标题"+mid)}
+		pages.errs[articleLink(mid, "1")] = errors.New("article page has no content")
+	}
+	var alerts []string
+	worker.Alert = func(message string) { alerts = append(alerts, message) }
+	pages.fetched = nil
+	var waits []time.Duration
+	for i := 0; i < 3; i++ {
+		waits = append(waits, worker.authorRound(context.Background(), 6*time.Hour))
+	}
+	if waits[0] != labelRetry || waits[1] != labelRetry || waits[2] != 0 {
+		t.Fatalf("retry the rows after %s, settle on the third try: %v", labelRetry, waits)
+	}
+	if len(pages.fetched) != 12 || pages.fetched[3] != articleLink("1", "1") {
+		t.Fatalf("each round reads the 3 rows plus the last good page once, fetched %v", pages.fetched)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("pages of a few rows failing is not the server's problem, got %v", alerts)
+	}
+	done, _ := worker.Store.BizAuthorRecords(context.Background())
+	for _, id := range []string{"rec7", "rec8", "rec9"} {
+		if done[id] != archive.AuthorNone {
+			t.Fatalf("%s should be given up after 3 tries, got %v", id, done)
+		}
+	}
+	if wait := worker.authorRound(context.Background(), 6*time.Hour); wait != 0 || len(pages.fetched) != 12 {
+		t.Fatalf("given-up rows are not read again: wait %s, fetched %d", wait, len(pages.fetched))
 	}
 }
 

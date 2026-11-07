@@ -26,17 +26,15 @@ import (
 // 发表满 labelOwnAfter 还没分类的（多是资讯订阅没收的单发快讯），把标题和正文递给资讯订阅的只分类接口
 // POST /api/internal/wechat-article-labels/classify（2026-11-07 用户定：已有标签的直接用，剩下的再补），
 // 同一个分类器、同一个模型，不进资讯订阅的库。正文先用归档，没有才读公开网页（和补作者共用每 6 秒一篇），
-// 一轮最多读 labelPagesPerRound 篇，读不完的隔 labelBacklogPause 再来。
+// 一轮补完；服务器读不了网页（见 readPage）就整轮停下退避，之后接着补。
 const (
-	categoryColumn     = "品类"
-	countryColumn      = "国家"
-	labelRetry         = 2 * time.Hour
-	labelOwnAfter      = 48 * time.Hour
-	labelPagesPerRound = 50
-	labelBacklogPause  = time.Hour
-	labelMaxMisses     = 3
-	classifyBatch      = 12 // 资讯订阅分类接口一次最多 12 篇
-	defaultFeedURL     = "https://feed.foodtalks.cn"
+	categoryColumn = "品类"
+	countryColumn  = "国家"
+	labelRetry     = 2 * time.Hour
+	labelOwnAfter  = 48 * time.Hour
+	labelMaxMisses = 3
+	classifyBatch  = 12 // 资讯订阅分类接口一次最多 12 篇
+	defaultFeedURL = "https://feed.foodtalks.cn"
 )
 
 // labelNames 是资讯订阅的标签 key → 表里的选项，和资讯订阅 label-taxonomy.ts 的显示名一致；
@@ -193,7 +191,7 @@ type LabelResult struct {
 	Kept    int `json:"kept"`
 	None    int `json:"none"`
 	Pending int `json:"pending"` // 资讯订阅还没分类，过一会儿再问
-	Left    int `json:"left"`    // 要自己递去分类、这一轮没轮上的
+	Left    int `json:"left"`    // 要自己递去分类、这一轮没成的（网页或模型这次没结果、被要求验证）
 }
 
 type labelTask struct {
@@ -378,8 +376,7 @@ func (w *Worker) classifyOwn(ctx context.Context, biz string, tasks []labelTask,
 		return err
 	}
 
-	pagesRead := 0
-	var stopErr, blocked error // blocked：被微信要求验证，这一轮不再读网页，归档里有正文的照常递
+	var stopErr, blocked error // blocked：服务器读不了网页（被微信要求验证、连着几篇没读成），这一轮不再读网页，归档里有正文的照常递
 	for _, task := range tasks {
 		if stopErr != nil {
 			break
@@ -397,10 +394,9 @@ func (w *Worker) classifyOwn(ctx context.Context, biz string, tasks []labelTask,
 				break
 			}
 			if content == "" {
-				if pagesRead >= labelPagesPerRound || blocked != nil {
-					continue // 这一轮读够了或被挡了，下一轮再来
+				if blocked != nil {
+					continue // 被挡了，下一轮再来
 				}
-				pagesRead++
 				page, err := w.readPage(ctx, task.link)
 				switch {
 				case errors.Is(err, errPageGone):
@@ -409,7 +405,7 @@ func (w *Worker) classifyOwn(ctx context.Context, biz string, tasks []labelTask,
 				case ctx.Err() != nil:
 					stopErr = ctx.Err()
 					continue
-				case errors.Is(err, errVerification):
+				case serverBlocked(err):
 					blocked = err // 挡的是这台服务器，不记到行上
 					continue
 				case err != nil:
@@ -563,8 +559,7 @@ func (w *Worker) WakeLabels() {
 	}
 }
 
-// labelRound 跑一轮，返回下次最晚多久再跑：要自己递去分类的这轮没补完就 labelBacklogPause 后接着补，
-// 有资讯订阅还没分类的新文章就 labelRetry 后再问，否则等叫醒；
+// labelRound 跑一轮，返回下次最晚多久再跑：有资讯订阅还没分类的新文章、或这轮有行没成，就 labelRetry 后再来，否则等叫醒；
 // 失败从 1 分钟起翻倍退避，最长到兜底间隔，连续失败第 3 次找人一次。
 func (w *Worker) labelRound(ctx context.Context, fallback time.Duration) time.Duration {
 	result, err := w.fillLabels(ctx)
@@ -576,17 +571,14 @@ func (w *Worker) labelRound(ctx context.Context, fallback time.Duration) time.Du
 	}
 	if err == nil {
 		w.labelFailures = 0
-		switch {
-		case result.Left > 0:
-			return labelBacklogPause
-		case result.Pending > 0:
+		if result.Left+result.Pending > 0 {
 			return labelRetry
 		}
 		return 0
 	}
 	w.labelFailures++
 	log.Printf("[BizData] labels round failed (%d in a row): %v", w.labelFailures, err)
-	if w.labelFailures == 3 && w.Alert != nil && !errors.Is(err, errVerification) { // 被要求验证由 readPage 报
+	if w.labelFailures == 3 && w.Alert != nil && !serverBlocked(err) { // 读不了网页由 readPage 报
 		w.Alert(fmt.Sprintf("公众号文章品类、国家补填连续 3 次失败：%v", err))
 	}
 	backoff := firstRetry << (w.labelFailures - 1)

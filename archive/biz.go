@@ -383,6 +383,39 @@ func (s *Store) BizAuthorSourceNames(ctx context.Context) (map[string]string, er
 	return names, rows.Err()
 }
 
+// BizAuthorReprint 是程序按转载写的一行作者：写的名字和来源公众号编号（没记下编号时为空）。
+type BizAuthorReprint struct {
+	RecordID, MsgID, Value, Source string
+}
+
+// BizAuthorReprints 是程序按转载写的作者行，按写下的先后。规则是「转载」的才算，编号查不到的另记规则、不在里面。
+func (s *Store) BizAuthorReprints(ctx context.Context) ([]BizAuthorReprint, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT record_id, msg_id, value, source FROM official_biz_authors
+		WHERE status = ? AND rule = '转载' AND value != ''
+		ORDER BY checked_at, record_id`, AuthorWritten)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BizAuthorReprint
+	for rows.Next() {
+		var row BizAuthorReprint
+		if err := rows.Scan(&row.RecordID, &row.MsgID, &row.Value, &row.Source); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// UpdateBizAuthor 改一行的来源编号、规则、名字或状态，不动写下的时间（「表里先写下的那种写法」按它认）。
+func (s *Store) UpdateBizAuthor(ctx context.Context, recordID, status, value, rule, source string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE official_biz_authors SET status = ?, value = ?, rule = ?, source = ? WHERE record_id = ?`,
+		status, value, rule, source, recordID)
+	return err
+}
+
 // 品类、国家补填（用户 2026-11-06 定：直接用资讯订阅打的标签）：看过的行记在 official_biz_labels，
 // 状态和作者同一套（kept 人填过、written 程序填了、none 资讯订阅没标、gone 行被删了），之后不再碰。
 

@@ -33,10 +33,10 @@ const (
 	authorColumn   = "作者"
 	authorFetchGap = 6 * time.Second
 	authorBatch    = 20
-	// 同一行连着几次打不开就不再试（多半是文章没了），留空。
+	// 同一行几次打不开就不再试（多半是这篇的网页认不出），留空；连着好几篇都打不开算服务器的事（pagesDownAfter），不记到行上。
 	authorMaxMisses = 3
-	// 一轮里连着几篇打不开就先停下，等退避后再来（多半是被微信拦了或断网）。
-	authorMaxFailuresInARow = 3
+	// 连着几篇没读成就当作这台服务器读不了网页（被微信拦了或断网）：整轮停下退避，不记到行上，读成一篇才算恢复。
+	pagesDownAfter = 3
 )
 
 var fbifEventTitle = regexp.MustCompile(`(?i)确认参加|确认参展|参展|议程|开幕|倒计时|FBIF ?20\d\d|食品创新展|高层确认|等企业|wow ?food|wow ?食品|分享实录`)
@@ -293,6 +293,14 @@ var errPageGone = errors.New("article page is gone")
 // errVerification 是微信要求验证（环境异常）：挡的是这台服务器，不是哪一篇；整轮停下退避，不记到行上。
 var errVerification = errors.New("WeChat asked for verification (环境异常)")
 
+// errPagesDown 是连着 pagesDownAfter 篇没读成：多半是这台服务器读不了网页，和 errVerification 一样整轮停下、不记到行上。
+var errPagesDown = errors.New("article pages keep failing")
+
+// serverBlocked 是读不了网页的原因在服务器而不在哪一篇：这一轮不再读，也不算到行上。
+func serverBlocked(err error) bool {
+	return errors.Is(err, errVerification) || errors.Is(err, errPagesDown)
+}
+
 const pageUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 var pageClient = &http.Client{Timeout: 30 * time.Second}
@@ -338,6 +346,8 @@ type AuthorResult struct {
 	NoByline int `json:"noByline"`
 	Failed   int `json:"failed"`
 	Left     int `json:"left"`
+	Sourced  int `json:"sourced"` // 早先的转载行补上了来源公众号编号
+	Unified  int `json:"unified"` // 同一个号的写法统一成最早那种
 }
 
 type authorTask struct {
@@ -386,25 +396,66 @@ func (w *Worker) fetchPage(ctx context.Context, link string) (string, error) {
 	return fetchArticlePage(ctx, link)
 }
 
-// readPage 读一篇公开文章页。补作者和补品类国家共用这一个闸口：两次之间至少隔 FetchGap（默认 6 秒），两边不会一起读；
-// 连着 3 次被微信要求验证（环境异常）时找人一次，两边谁读到都算，读成一篇就清零。
+// readPage 读一篇公开文章页。补作者和补品类国家共用这一个闸口：两次之间至少隔 FetchGap（默认 6 秒），两边不会一起读。
+// 两边加起来连着 pagesDownAfter 篇没读成（文章已删不算）时，把上次读成的那篇再读一次：读得成就是这几篇自己的毛病，照常回原错；
+// 读不成（或还没读成过）就当作服务器读不了网页，回 errPagesDown，并在变坏那一刻找人一次。读成一篇就恢复。
 func (w *Worker) readPage(ctx context.Context, link string) (string, error) {
 	w.pageMu.Lock()
 	defer w.pageMu.Unlock()
+	page, err := w.pacedFetch(ctx, link)
+	switch {
+	case err == nil:
+		w.pageRead(link)
+		return page, nil
+	case errors.Is(err, errPageGone):
+		w.pageRead("")
+		return "", err
+	case ctx.Err() != nil:
+		return "", ctx.Err()
+	}
+	w.pageFailures++
+	if w.pageFailures < pagesDownAfter {
+		return "", err
+	}
+	if !errors.Is(err, errVerification) && w.lastGoodPage != "" && w.lastGoodPage != link {
+		_, probeErr := w.pacedFetch(ctx, w.lastGoodPage)
+		if probeErr == nil || errors.Is(probeErr, errPageGone) {
+			w.pageRead("")
+			return "", err
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+	}
+	if !w.pagesDown {
+		w.pagesDown = true
+		if w.Alert != nil {
+			if errors.Is(err, errVerification) {
+				w.Alert("读公众号文章网页连续 3 次被微信要求验证（环境异常）：补作者、品类、国家先停下，过一阵自动再试")
+			} else {
+				w.Alert(fmt.Sprintf("读公众号文章网页连续 3 篇没读成（最后一次：%v）：补作者、品类、国家先停下，过一阵自动再试", err))
+			}
+		}
+	}
+	if errors.Is(err, errVerification) {
+		return "", err
+	}
+	return "", fmt.Errorf("%w (%d in a row), last: %v", errPagesDown, w.pageFailures, err)
+}
+
+func (w *Worker) pacedFetch(ctx context.Context, link string) (string, error) {
 	if err := w.pause(ctx); err != nil {
 		return "", err
 	}
-	page, err := w.fetchPage(ctx, link)
-	switch {
-	case errors.Is(err, errVerification):
-		w.pageVerifications++
-		if w.pageVerifications == 3 && w.Alert != nil {
-			w.Alert("读公众号文章网页连续 3 次被微信要求验证（环境异常）：补作者、品类、国家先停下，过一阵自动再试")
-		}
-	case err == nil || errors.Is(err, errPageGone):
-		w.pageVerifications = 0
+	return w.fetchPage(ctx, link)
+}
+
+// pageRead 记下读成了一篇（或读到文章已删）：服务器读得了网页。link 非空时记成下次用来对照的那篇。
+func (w *Worker) pageRead(link string) {
+	w.pageFailures, w.pagesDown = 0, false
+	if link != "" {
+		w.lastGoodPage = link
 	}
-	return page, err
 }
 
 func (w *Worker) pause(ctx context.Context) error {
@@ -442,11 +493,13 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 		return result, fmt.Errorf("read article table: %w", err)
 	}
 	var tasks []authorTask
+	links := make(map[string]string, len(records))
 	for _, record := range records {
+		title, link := linkCell(record.Fields["内容标题"])
+		links[record.RecordID] = link
 		if done[record.RecordID] != "" {
 			continue
 		}
-		title, link := linkCell(record.Fields["内容标题"])
 		match := articleLinkPattern.FindStringSubmatch(link)
 		if match == nil {
 			continue // 没有文章链接的行读不了网页
@@ -472,11 +525,10 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 
 	pages := make(map[string]authorFill) // 同一篇文章在表里有两行时只读一次网页
 	var batch []authorFill
-	failuresInARow, pagesRead := 0, 0
-	var stopErr, lastErr error
+	var stopErr error
 	for i, task := range tasks {
 		if ctx.Err() != nil {
-			result.Left = len(tasks) - i
+			result.Left += len(tasks) - i
 			break
 		}
 		fill, ok := pages[task.msgID]
@@ -484,17 +536,15 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 			fill, err = w.findAuthor(ctx, task)
 			if err != nil {
 				if ctx.Err() != nil {
-					result.Left = len(tasks) - i
+					result.Left += len(tasks) - i
 					break
 				}
-				result.Failed++
-				if errors.Is(err, errVerification) {
+				if serverBlocked(err) {
 					stopErr = err
-					result.Left = len(tasks) - i
+					result.Left += len(tasks) - i
 					break
 				}
-				failuresInARow++
-				lastErr = err
+				result.Failed++ // 这篇自己读不成；服务器读不了网页由 readPage 认出来（serverBlocked）
 				if w.authorMisses == nil {
 					w.authorMisses = make(map[string]int)
 				}
@@ -502,16 +552,11 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 				log.Printf("[BizData] author: page %s failed (%d for this row): %v", task.msgID, w.authorMisses[task.recordID], err)
 				if w.authorMisses[task.recordID] >= authorMaxMisses {
 					batch = append(batch, authorFill{task: task, status: archive.AuthorNone, rule: "网页打不开"})
-				}
-				if failuresInARow >= authorMaxFailuresInARow {
-					stopErr = fmt.Errorf("%d article pages in a row failed, last: %w", failuresInARow, err)
-					result.Left = len(tasks) - i - 1
-					break
+				} else {
+					result.Left++
 				}
 				continue
 			}
-			failuresInARow = 0
-			pagesRead++
 			if fill.source != "" && fill.value != "" {
 				if name, ok := accountNames[fill.source]; ok {
 					fill.value = name // 同一个号沿用已经写过的名字
@@ -533,8 +578,8 @@ func (w *Worker) fillAuthors(ctx context.Context) (AuthorResult, error) {
 	if err := w.writeAuthors(ctx, batch, &result); err != nil {
 		return result, err
 	}
-	if stopErr == nil && result.Failed > 0 && pagesRead == 0 {
-		stopErr = fmt.Errorf("all %d article pages failed, last: %w", result.Failed, lastErr) // 一篇都没读成也算这轮失败
+	if stopErr == nil {
+		stopErr = w.fillReprintSources(ctx, links, &result)
 	}
 	return result, stopErr
 }
@@ -664,22 +709,26 @@ func wakeLoop(stopCh <-chan struct{}, wake <-chan struct{}, initialDelay time.Du
 	}
 }
 
-// authorRound 跑一轮，返回下次最晚多久再跑；0 表示等叫醒。
+// authorRound 跑一轮，返回下次最晚多久再跑：有行这次网页没读成就 labelRetry 后再试，0 表示等叫醒。
 func (w *Worker) authorRound(ctx context.Context, fallback time.Duration) time.Duration {
 	result, err := w.fillAuthors(ctx)
-	if result.Filled+result.Kept+result.NoByline+result.Failed > 0 {
-		log.Printf("[BizData] author: filled=%d kept=%d no_byline=%d failed=%d left=%d", result.Filled, result.Kept, result.NoByline, result.Failed, result.Left)
+	if result.Filled+result.Kept+result.NoByline+result.Failed+result.Sourced+result.Unified > 0 {
+		log.Printf("[BizData] author: filled=%d kept=%d no_byline=%d failed=%d left=%d sourced=%d unified=%d",
+			result.Filled, result.Kept, result.NoByline, result.Failed, result.Left, result.Sourced, result.Unified)
 	}
 	if ctx.Err() != nil {
 		return 0
 	}
 	if err == nil {
 		w.authorFailures = 0
+		if result.Left > 0 {
+			return labelRetry // 有行这次网页没读成，过一会儿再试
+		}
 		return 0
 	}
 	w.authorFailures++
 	log.Printf("[BizData] author round failed (%d in a row): %v", w.authorFailures, err)
-	if w.authorFailures == 3 && w.Alert != nil && !errors.Is(err, errVerification) { // 被要求验证由 readPage 报
+	if w.authorFailures == 3 && w.Alert != nil && !serverBlocked(err) { // 读不了网页由 readPage 报
 		w.Alert(fmt.Sprintf("公众号文章作者补全连续 3 次失败：%v", err))
 	}
 	backoff := firstRetry << (w.authorFailures - 1)

@@ -183,8 +183,8 @@ func TestLabelsTheFeedNeverClassifiedGoThroughItsClassifier(t *testing.T) {
 	pages.pages[articleLink("900", "1")] = originalPage(`<p>别的</p>`)
 	pages.pages[articleLink("990", "1")] = originalPage(`<p>饮料</p>`)
 
-	if wait := worker.labelRound(ctx, 6*time.Hour); wait != labelBacklogPause {
-		t.Fatalf("a row to retry comes back in %s, got %s", labelBacklogPause, wait)
+	if wait := worker.labelRound(ctx, 6*time.Hour); wait != labelRetry {
+		t.Fatalf("a row to retry comes back in %s, got %s", labelRetry, wait)
 	}
 	if len(feed.requests) != 1 {
 		t.Fatalf("one batch for this account, got %d", len(feed.requests))
@@ -245,21 +245,21 @@ func TestLabelsTheFeedNeverClassifiedGoThroughItsClassifier(t *testing.T) {
 	}
 }
 
-// 读网页一轮最多 labelPagesPerRound 篇；被微信要求验证整轮停、不记到行上；资讯订阅额度用完就等到明天，不再读网页。
+// 积压的一轮读完；被微信要求验证整轮停、不记到行上；资讯订阅额度用完就等到明天，不再读网页。
 func TestLabelBackfillPacesPagesAndStops(t *testing.T) {
 	ctx := context.Background()
 	worker, rows, pages, feed := newLabelWorker(t)
-	for i := 0; i < labelPagesPerRound+5; i++ {
+	for i := 0; i < 60; i++ {
 		mid := strconv.Itoa(1000 + i)
 		rows["rec"+mid] = map[string]interface{}{"内容标题": titled(mid, "1", "快讯"+mid), "发表日期": dayMs(2026, 9, 1)}
 		pages.pages[articleLink(mid, "1")] = originalPage(`<p>正文</p>`)
 		feed.answers[mid+"_1"] = []string{"food"}
 	}
-	if wait := worker.labelRound(ctx, 6*time.Hour); wait != labelBacklogPause || len(pages.fetched) != labelPagesPerRound {
-		t.Fatalf("one round reads at most %d pages (read %d), then waits %s, got %s", labelPagesPerRound, len(pages.fetched), labelBacklogPause, wait)
+	if wait := worker.labelRound(ctx, 6*time.Hour); wait != 0 || len(pages.fetched) != 60 {
+		t.Fatalf("the whole backlog in one round, then wait for new rows: read %d, wait %s", len(pages.fetched), wait)
 	}
-	if wait := worker.labelRound(ctx, 6*time.Hour); wait != 0 || len(pages.fetched) != labelPagesPerRound+5 {
-		t.Fatalf("the rest next round, then wait for new rows: read %d, wait %s", len(pages.fetched), wait)
+	if done, _ := worker.Store.BizLabelRecords(ctx); len(done) != 60 {
+		t.Fatalf("all 60 rows settled, got %d", len(done))
 	}
 
 	var alerts []string

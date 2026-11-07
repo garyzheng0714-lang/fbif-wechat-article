@@ -75,7 +75,9 @@ type feedArticle struct {
 	Labels     []string `json:"labels"`
 }
 
-var feedClient = &http.Client{Timeout: time.Minute}
+// feedClient 等 6 分钟：资讯订阅的分类接口一次最长 4 分钟（12 篇遇上联网补证国家会超过 1 分钟），前面 nginx 那条路径等 300 秒，
+// 这里比它们都长，免得自己先掐断、那边白做（2026-11-07 原来等 1 分钟，被掐断过一批）。
+var feedClient = &http.Client{Timeout: 6 * time.Minute}
 
 // feedLabels 取这个号从 since 起所有文章的标签（mid_idx → 文章），一页取不完就接着取。
 func (w *Worker) feedLabels(ctx context.Context, biz string, since time.Time) (map[string]feedArticle, error) {
